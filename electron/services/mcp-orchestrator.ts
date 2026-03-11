@@ -3,6 +3,8 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import { execSync } from 'child_process';
+import type { AppSettings } from '../types';
+import { getAllProviders } from '../providers';
 
 /**
  * MCP Orchestrator Service
@@ -57,127 +59,130 @@ export function getMcpSocialDataPath(): string {
 }
 
 /**
- * Auto-setup MCP orchestrator on app start using claude mcp add command
- * This function runs during app initialization to ensure the orchestrator is properly configured
+ * Get the path to the bundled MCP X server (tweet posting)
+ * Always uses the packaged app path - MCP servers are bundled in extraResources
  */
-export async function setupMcpOrchestrator(): Promise<void> {
+export function getMcpXPath(): string {
+  return path.join(process.resourcesPath, 'mcp-x', 'dist', 'bundle.js');
+}
+
+/**
+ * Get the path to the bundled MCP world server (generative zones)
+ * Always uses the packaged app path - MCP servers are bundled in extraResources
+ */
+export function getMcpWorldPath(): string {
+  return path.join(process.resourcesPath, 'mcp-world', 'dist', 'bundle.js');
+}
+
+/**
+ * Auto-setup MCP servers on app start for ALL providers.
+ * Registers bundled MCP servers (orchestrator, telegram, kanban, etc.)
+ * with each provider's configuration system.
+ */
+export async function setupMcpOrchestrator(appSettings?: AppSettings): Promise<void> {
   try {
-    const orchestratorPath = getMcpOrchestratorPath();
-    const telegramPath = getMcpTelegramPath();
-    const kanbanPath = getMcpKanbanPath();
-    const vaultPath = getMcpVaultPath();
-    const socialDataPath = getMcpSocialDataPath();
+    // Build the list of MCP servers to register
+    const mcpServers: Array<{ name: string; serverPath: string }> = [
+      { name: 'claude-mgr-orchestrator', serverPath: getMcpOrchestratorPath() },
+      { name: 'claude-mgr-telegram', serverPath: getMcpTelegramPath() },
+      { name: 'claude-mgr-kanban', serverPath: getMcpKanbanPath() },
+      { name: 'claude-mgr-vault', serverPath: getMcpVaultPath() },
+      { name: 'dorothy-socialdata', serverPath: getMcpSocialDataPath() },
+      { name: 'dorothy-x', serverPath: getMcpXPath() },
+      { name: 'dorothy-world', serverPath: getMcpWorldPath() },
+    ];
 
-    const claudeDir = path.join(os.homedir(), '.claude');
-    const mcpConfigPath = path.join(claudeDir, 'mcp.json');
-
-    // Setup orchestrator if exists
-    if (fs.existsSync(orchestratorPath)) {
-      await setupMcpServer('claude-mgr-orchestrator', orchestratorPath, claudeDir, mcpConfigPath);
-    } else {
-      console.log('MCP orchestrator not found at', orchestratorPath);
+    // Add Tasmania if enabled
+    if (appSettings?.tasmaniaEnabled && appSettings.tasmaniaServerPath) {
+      if (fs.existsSync(appSettings.tasmaniaServerPath)) {
+        mcpServers.push({ name: 'tasmania', serverPath: appSettings.tasmaniaServerPath });
+      } else {
+        console.log('Tasmania MCP server not found at', appSettings.tasmaniaServerPath);
+      }
     }
 
-    // Setup telegram MCP server if exists (makes send_telegram available to all agents)
-    if (fs.existsSync(telegramPath)) {
-      await setupMcpServer('claude-mgr-telegram', telegramPath, claudeDir, mcpConfigPath);
-    } else {
-      console.log('MCP telegram not found at', telegramPath);
+    const providers = getAllProviders();
+
+    // For each server × each provider: register if not already present
+    for (const { name, serverPath } of mcpServers) {
+      if (!fs.existsSync(serverPath)) {
+        console.log(`MCP server ${name} not found at ${serverPath}`);
+        continue;
+      }
+
+      const isTypeScript = serverPath.endsWith('.ts');
+      const command = isTypeScript ? 'npx' : 'node';
+      const args = isTypeScript ? ['tsx', serverPath] : [serverPath];
+
+      for (const provider of providers) {
+        try {
+          if (!provider.isMcpServerRegistered(name, serverPath)) {
+            await provider.registerMcpServer(name, command, args);
+          } else {
+            console.log(`[${provider.id}] ${name} already registered`);
+          }
+        } catch (err) {
+          console.error(`[${provider.id}] Failed to register ${name}:`, err);
+        }
+      }
     }
 
-    // Setup kanban MCP server if exists (makes task management available to all agents)
-    if (fs.existsSync(kanbanPath)) {
-      await setupMcpServer('claude-mgr-kanban', kanbanPath, claudeDir, mcpConfigPath);
-    } else {
-      console.log('MCP kanban not found at', kanbanPath);
-    }
-
-    // Setup vault MCP server if exists (makes document management available to all agents)
-    if (fs.existsSync(vaultPath)) {
-      await setupMcpServer('claude-mgr-vault', vaultPath, claudeDir, mcpConfigPath);
-    } else {
-      console.log('MCP vault not found at', vaultPath);
-    }
-
-    // Setup socialdata MCP server if exists (makes Twitter/X search available to all agents)
-    if (fs.existsSync(socialDataPath)) {
-      await setupMcpServer('dorothy-socialdata', socialDataPath, claudeDir, mcpConfigPath);
-    } else {
-      console.log('MCP socialdata not found at', socialDataPath);
-    }
+    // Install bundled skills to ~/.claude/skills/ (Claude-only)
+    await installBundledSkills();
   } catch (err) {
     console.error('Failed to auto-setup MCP servers:', err);
   }
 }
 
 /**
- * Helper to setup a single MCP server
+ * Install bundled skills to all providers' skill directories.
+ * Skills bundled in the app's skills/ directory are copied to each
+ * provider's first skill directory so they're available to all agents.
  */
-async function setupMcpServer(name: string, serverPath: string, claudeDir: string, mcpConfigPath: string): Promise<void> {
-  // Check if current config path matches the expected path
-  let needsUpdate = true;
-  if (fs.existsSync(mcpConfigPath)) {
+async function installBundledSkills(): Promise<void> {
+  const bundledSkills = ['world-builder'];
+  const providers = getAllProviders();
+
+  for (const skillName of bundledSkills) {
     try {
-      const mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
-      const existingConfig = mcpConfig.mcpServers?.[name];
-      if (existingConfig?.args?.[0] === serverPath) {
-        console.log(`${name} already configured with correct path`);
-        needsUpdate = false;
-      } else if (existingConfig) {
-        console.log(`${name} path changed, updating...`);
-        console.log('  Old path:', existingConfig.args?.[0]);
-        console.log('  New path:', serverPath);
+      const sourceDir = path.join(app.getAppPath(), 'skills', skillName);
+      const sourceFile = path.join(sourceDir, 'SKILL.md');
+
+      if (!fs.existsSync(sourceFile)) {
+        console.log(`Bundled skill ${skillName} not found at ${sourceFile}`);
+        continue;
       }
-    } catch {
-      // Config parsing failed, will update
-    }
-  }
 
-  if (!needsUpdate) {
-    return;
-  }
+      const sourceContent = fs.readFileSync(sourceFile, 'utf-8');
 
-  // Remove existing config first (in case path changed)
-  try {
-    execSync(`claude mcp remove -s user ${name} 2>&1`, { encoding: 'utf-8', stdio: 'pipe' });
-    console.log(`Removed old ${name} config`);
-  } catch {
-    // Ignore errors if it doesn't exist
-  }
+      for (const provider of providers) {
+        const skillDirs = provider.getSkillDirectories();
+        if (!skillDirs.length) continue;
 
-  // Add the MCP server using claude mcp add with -s user for global scope
-  const addCommand = `claude mcp add -s user ${name} node "${serverPath}"`;
-  console.log('Running:', addCommand);
+        const targetDir = path.join(skillDirs[0], skillName);
+        const targetFile = path.join(targetDir, 'SKILL.md');
 
-  try {
-    execSync(addCommand, { encoding: 'utf-8', stdio: 'pipe' });
-    console.log(`${name} configured globally via claude mcp add -s user`);
-  } catch (addErr) {
-    console.error(`Failed to add ${name} via claude mcp add -s user:`, addErr);
-    // Fallback: also write to mcp.json for compatibility
-    if (!fs.existsSync(claudeDir)) {
-      fs.mkdirSync(claudeDir, { recursive: true });
-    }
-
-    let mcpConfig: { mcpServers?: Record<string, unknown> } = { mcpServers: {} };
-    if (fs.existsSync(mcpConfigPath)) {
-      try {
-        mcpConfig = JSON.parse(fs.readFileSync(mcpConfigPath, 'utf-8'));
-        if (!mcpConfig.mcpServers) {
-          mcpConfig.mcpServers = {};
+        // Check if already installed with same content
+        if (fs.existsSync(targetFile)) {
+          try {
+            const targetContent = fs.readFileSync(targetFile, 'utf-8');
+            if (sourceContent === targetContent) {
+              continue;
+            }
+            console.log(`[${provider.id}] Skill ${skillName} outdated, updating...`);
+          } catch {
+            // File exists but unreadable, overwrite
+          }
         }
-      } catch {
-        mcpConfig = { mcpServers: {} };
+
+        // Install the skill
+        fs.mkdirSync(targetDir, { recursive: true });
+        fs.copyFileSync(sourceFile, targetFile);
+        console.log(`[${provider.id}] Installed skill ${skillName} to ${targetDir}`);
       }
+    } catch (err) {
+      console.error(`Failed to install skill ${skillName}:`, err);
     }
-
-    mcpConfig.mcpServers![name] = {
-      command: 'node',
-      args: [serverPath]
-    };
-
-    fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2));
-    console.log(`${name} configured via mcp.json fallback`);
   }
 }
 

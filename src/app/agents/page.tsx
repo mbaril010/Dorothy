@@ -1,13 +1,13 @@
 'use client';
 
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { Bot, Loader2 } from 'lucide-react';
 import { useElectronAgents, useElectronFS, useElectronSkills, isElectron } from '@/hooks/useElectron';
 import { useClaude } from '@/hooks/useClaude';
 import { useAgentFiltering } from '@/hooks/useAgentFiltering';
 import { useSuperAgent } from '@/hooks/useSuperAgent';
 import { useAgentTerminal } from '@/hooks/useAgentTerminal';
-import type { AgentCharacter } from '@/types/electron';
+import type { AgentCharacter, AgentProvider } from '@/types/electron';
 import NewChatModal from '@/components/NewChatModal';
 import AgentTerminalDialog from '@/components/AgentWorld/AgentTerminalDialog';
 import {
@@ -35,6 +35,17 @@ export default function AgentsPage() {
   const { installedSkills, refresh: refreshSkills } = useElectronSkills();
   const { data: claudeData } = useClaude();
 
+  // Terminal settings from app settings
+  const [terminalTheme, setTerminalTheme] = useState<'dark' | 'light'>('dark');
+  const [terminalFontSize, setTerminalFontSize] = useState<number | undefined>();
+  useEffect(() => {
+    if (!isElectron() || !window.electronAPI?.appSettings) return;
+    window.electronAPI.appSettings.get().then((settings) => {
+      if (settings?.terminalTheme) setTerminalTheme(settings.terminalTheme);
+      if (settings?.terminalFontSize) setTerminalFontSize(settings.terminalFontSize);
+    });
+  }, []);
+
   // Local state
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [showNewChatModal, setShowNewChatModal] = useState(false);
@@ -45,6 +56,11 @@ export default function AgentsPage() {
 
   // Refs
   const terminalRef = useRef<HTMLDivElement>(null);
+  const pendingStartRef = useRef<{
+    agentId: string;
+    prompt: string;
+    options?: { model?: string; provider?: AgentProvider; localModel?: string };
+  } | null>(null);
 
   // Custom hooks
   const { superAgent, isCreatingSuperAgent, handleSuperAgentClick } = useSuperAgent({
@@ -60,25 +76,41 @@ export default function AgentsPage() {
     projectFilter,
   });
 
-  const { terminalReady, clearTerminal } = useAgentTerminal({
-    selectedAgentId: selectedAgent,
-    terminalRef,
-  });
-
   // Get selected agent data
   const selectedAgentData = agents.find((a) => a.id === selectedAgent);
 
-  // Handle agent selection - auto-start idle agents
+  // Called by useAgentTerminal when xterm is fully initialized for an agent.
+  // This is the reliable signal that the terminal can receive output — no
+  // React state batching issues because it's invoked directly from initTerminal.
+  const handleTerminalReady = useCallback((agentId: string) => {
+    const pending = pendingStartRef.current;
+    if (pending && pending.agentId === agentId) {
+      pendingStartRef.current = null;
+      startAgent(pending.agentId, pending.prompt, pending.options).catch(error => {
+        console.error('Failed to start agent after creation:', error);
+      });
+    }
+  }, [startAgent]);
+
+  const { terminalReady, clearTerminal } = useAgentTerminal({
+    selectedAgentId: selectedAgent,
+    terminalRef,
+    provider: selectedAgentData?.provider,
+    terminalTheme,
+    terminalFontSize,
+    onReady: handleTerminalReady,
+  });
+
+  // Handle agent selection - auto-start idle agents via onReady callback
   const handleSelectAgent = useCallback((agentId: string) => {
-    setSelectedAgent(agentId);
     const agent = agents.find(a => a.id === agentId);
     if (agent && (agent.status === 'idle' || agent.status === 'completed' || agent.status === 'error') && !agent.pathMissing) {
-      // Auto-start the claude session
-      setTimeout(() => {
-        startAgent(agentId, '');
-      }, 100);
+      pendingStartRef.current = { agentId, prompt: '', options: {} };
+    } else {
+      pendingStartRef.current = null;
     }
-  }, [agents, startAgent]);
+    setSelectedAgent(agentId);
+  }, [agents]);
 
   // Handlers
   const handleCreateAgent = useCallback(async (
@@ -90,22 +122,24 @@ export default function AgentsPage() {
     character?: AgentCharacter,
     name?: string,
     secondaryProjectPath?: string,
-    skipPermissions?: boolean
+    skipPermissions?: boolean,
+    provider?: AgentProvider,
+    localModel?: string,
+    obsidianVaultPaths?: string[],
   ) => {
     try {
-      const agent = await createAgent({ projectPath, skills, worktree, character, name, secondaryProjectPath, skipPermissions });
+      const agent = await createAgent({ projectPath, skills, worktree, character, name, secondaryProjectPath, skipPermissions, provider, localModel, obsidianVaultPaths });
+      pendingStartRef.current = {
+        agentId: agent.id,
+        prompt,
+        options: { model: provider === 'local' ? undefined : model, provider, localModel },
+      };
       setSelectedAgent(agent.id);
       setShowNewChatModal(false);
-
-      if (prompt) {
-        setTimeout(async () => {
-          await startAgent(agent.id, prompt, { model });
-        }, 600);
-      }
     } catch (error) {
       console.error('Failed to create agent:', error);
     }
-  }, [createAgent, startAgent]);
+  }, [createAgent]);
 
   const handleStartAgent = useCallback(async (agentId: string, prompt: string) => {
     clearTerminal();
@@ -215,10 +249,7 @@ export default function AgentsPage() {
               terminalRef={terminalRef}
               terminalReady={terminalReady}
               onStop={() => stopAgent(selectedAgentData.id)}
-              onStart={() => {
-                setStartPromptValue('');
-                setShowStartPromptModal(true);
-              }}
+              onStart={() => handleStartAgent(selectedAgentData.id, '')}
               onRemove={() => handleRemoveAgent(selectedAgentData.id)}
             />
           ) : (

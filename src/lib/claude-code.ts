@@ -1,8 +1,61 @@
 import { promises as fs } from 'fs';
+import { existsSync } from 'fs';
 import path from 'path';
 import os from 'os';
 
 const CLAUDE_DIR = path.join(os.homedir(), '.claude');
+
+/**
+ * Decode a Claude Code project directory name back to a filesystem path.
+ * Claude encodes paths by replacing both `/` and `.` with `-`.
+ * Greedy filesystem matching tries `-` and `.` separator combinations.
+ */
+function decodeProjectPath(dirName: string): string {
+  const tokens = dirName.replace(/^-/, '').split('-');
+  let resolved = '/';
+  let i = 0;
+
+  while (i < tokens.length) {
+    let matched = false;
+    for (let len = tokens.length - i; len >= 1; len--) {
+      const subTokens = tokens.slice(i, i + len);
+      const names = len === 1 ? [subTokens[0]] : sepCombinations(subTokens);
+      for (const name of names) {
+        const candidate = path.join(resolved, name);
+        try {
+          if (existsSync(candidate)) {
+            resolved = candidate;
+            i += len;
+            matched = true;
+            break;
+          }
+        } catch { /* ignore */ }
+      }
+      if (matched) break;
+    }
+    if (!matched) {
+      resolved = path.join(resolved, tokens[i]);
+      i++;
+    }
+  }
+  return resolved;
+}
+
+function sepCombinations(tokens: string[]): string[] {
+  const seps = ['-', '.'];
+  const positions = tokens.length - 1;
+  if (positions > 6) return [tokens.join('-'), tokens.join('.')];
+  const total = 1 << positions;
+  const results: string[] = [];
+  for (let mask = 0; mask < total; mask++) {
+    let r = tokens[0];
+    for (let j = 0; j < positions; j++) {
+      r += seps[(mask >> j) & 1] + tokens[j + 1];
+    }
+    results.push(r);
+  }
+  return results;
+}
 
 export interface ClaudeSettings {
   enabledPlugins: Record<string, boolean>;
@@ -151,8 +204,8 @@ export async function getProjects(): Promise<ClaudeProject[]> {
 
     for (const entry of entries) {
       if (entry.isDirectory() && entry.name !== '.' && entry.name !== '..') {
-        // Convert directory name back to path
-        const projectPath = '/' + entry.name.replace(/-/g, '/');
+        // Decode encoded path (Claude replaces both / and . with -)
+        const projectPath = decodeProjectPath(entry.name);
         const projectDir = path.join(projectsDir, entry.name);
 
         // Get session files

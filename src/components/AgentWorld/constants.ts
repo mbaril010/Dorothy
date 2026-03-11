@@ -38,6 +38,36 @@ export const TERMINAL_THEME = {
   brightWhite: '#fafafa',
 } as const;
 
+// Light terminal theme
+export const TERMINAL_THEME_LIGHT = {
+  background: '#FFFFFF',
+  foreground: '#1a1a2e',
+  cursor: '#3D9B94',
+  cursorAccent: '#FFFFFF',
+  selectionBackground: '#3D9B9433',
+  black: '#1a1a2e',
+  red: '#dc2626',
+  green: '#16a34a',
+  yellow: '#ca8a04',
+  blue: '#2563eb',
+  magenta: '#9333ea',
+  cyan: '#0d7377',
+  white: '#e4e4e7',
+  brightBlack: '#71717a',
+  brightRed: '#ef4444',
+  brightGreen: '#22c55e',
+  brightYellow: '#eab308',
+  brightBlue: '#3b82f6',
+  brightMagenta: '#a855f7',
+  brightCyan: '#3D9B94',
+  brightWhite: '#fafafa',
+} as const;
+
+// Helper to get terminal theme by name
+export function getTerminalTheme(theme: 'dark' | 'light' = 'dark') {
+  return theme === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME;
+}
+
 // Quick terminal theme (slightly different background)
 export const QUICK_TERMINAL_THEME = {
   ...TERMINAL_THEME,

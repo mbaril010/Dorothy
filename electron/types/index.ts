@@ -5,6 +5,8 @@ export interface WorktreeConfig {
 
 export type AgentCharacter = 'robot' | 'ninja' | 'wizard' | 'astronaut' | 'knight' | 'pirate' | 'alien' | 'viking';
 
+export type AgentProvider = 'claude' | 'codex' | 'gemini' | 'local';
+
 export interface AgentStatus {
   id: string;
   status: 'idle' | 'running' | 'completed' | 'error' | 'waiting';
@@ -24,10 +26,18 @@ export interface AgentStatus {
   skipPermissions?: boolean;
   currentSessionId?: string;
   kanbanTaskId?: string;  // For kanban task completion tracking
+  lastCleanOutput?: string;  // Clean text output captured from transcript by hooks
+  provider?: AgentProvider;   // 'claude' (default) or 'local' (Tasmania)
+  localModel?: string;        // Tasmania model name when provider is 'local'
+  obsidianVaultPaths?: string[]; // Obsidian vault paths to mount via --add-dir (read-only)
 }
 
 export interface CLIPaths {
   claude: string;
+  codex: string;
+  gemini: string;
+  gws: string;
+  gcloud: string;
   gh: string;
   node: string;
   additionalPaths: string[];
@@ -55,7 +65,20 @@ export interface AppSettings {
   jiraApiToken: string;
   socialDataEnabled: boolean;
   socialDataApiKey: string;
+  xPostingEnabled: boolean;
+  xApiKey: string;
+  xApiSecret: string;
+  xAccessToken: string;
+  xAccessTokenSecret: string;
+  tasmaniaEnabled: boolean;
+  tasmaniaServerPath: string;
+  gwsEnabled: boolean;
+  gwsSkillsInstalled: boolean;
   verboseModeEnabled: boolean;
   autoCheckUpdates: boolean;
   cliPaths: CLIPaths;
+  defaultProvider?: AgentProvider;
+  obsidianVaultPaths?: string[];
+  terminalFontSize?: number;
+  terminalTheme?: 'dark' | 'light';
 }

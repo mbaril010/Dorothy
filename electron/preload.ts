@@ -50,6 +50,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name?: string;
       secondaryProjectPath?: string;
       skipPermissions?: boolean;
+      provider?: 'claude' | 'local';
+      localModel?: string;
+      obsidianVaultPaths?: string[];
     }) => ipcRenderer.invoke('agent:create', config),
     update: (params: {
       id: string;
@@ -59,7 +62,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name?: string;
       character?: string;
     }) => ipcRenderer.invoke('agent:update', params),
-    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean } }) =>
+    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean; provider?: 'claude' | 'local'; localModel?: string } }) =>
       ipcRenderer.invoke('agent:start', params),
     get: (id: string) =>
       ipcRenderer.invoke('agent:get', id),
@@ -118,6 +121,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('skill:install-kill', params),
     listInstalled: () =>
       ipcRenderer.invoke('skill:list-installed'),
+    listInstalledAll: () =>
+      ipcRenderer.invoke('skill:list-installed-all'),
+    linkToProvider: (params: { skillName: string; providerId: string }) =>
+      ipcRenderer.invoke('skill:link-to-provider', params),
+    fetchMarketplace: () =>
+      ipcRenderer.invoke('skill:fetch-marketplace') as Promise<{ skills: Array<{ rank: number; name: string; repo: string; installs: string; installsNum: number }> | null }>,
     onPtyData: (callback: (event: { id: string; data: string }) => void) => {
       const listener = (_: unknown, event: { id: string; data: string }) => callback(event);
       ipcRenderer.on('skill:pty-data', listener);
@@ -245,6 +254,50 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('socialdata:test'),
   },
 
+  // X API (posting)
+  xApi: {
+    test: () =>
+      ipcRenderer.invoke('xapi:test') as Promise<{ success: boolean; username?: string; error?: string }>,
+  },
+
+  // Google Workspace (gws CLI)
+  gws: {
+    detect: () =>
+      ipcRenderer.invoke('gws:detect'),
+    detectGcloud: () =>
+      ipcRenderer.invoke('gws:detectGcloud'),
+    authStatus: () =>
+      ipcRenderer.invoke('gws:authStatus'),
+    setup: () =>
+      ipcRenderer.invoke('gws:setup'),
+    remove: () =>
+      ipcRenderer.invoke('gws:remove'),
+    getMcpStatus: () =>
+      ipcRenderer.invoke('gws:getMcpStatus'),
+    listSkills: () =>
+      ipcRenderer.invoke('gws:listSkills') as Promise<string[]>,
+  },
+
+  // Tasmania (Local LLM)
+  tasmania: {
+    test: () =>
+      ipcRenderer.invoke('tasmania:test'),
+    getStatus: () =>
+      ipcRenderer.invoke('tasmania:getStatus'),
+    getModels: () =>
+      ipcRenderer.invoke('tasmania:getModels'),
+    loadModel: (modelPath: string) =>
+      ipcRenderer.invoke('tasmania:loadModel', modelPath),
+    stopModel: () =>
+      ipcRenderer.invoke('tasmania:stopModel'),
+    getMcpStatus: () =>
+      ipcRenderer.invoke('tasmania:getMcpStatus'),
+    setup: () =>
+      ipcRenderer.invoke('tasmania:setup'),
+    remove: () =>
+      ipcRenderer.invoke('tasmania:remove'),
+  },
+
   // Dialogs
   dialog: {
     openFolder: () =>
@@ -307,12 +360,34 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('scheduler:createTask', params),
     deleteTask: (taskId: string) =>
       ipcRenderer.invoke('scheduler:deleteTask', taskId),
+    updateTask: (taskId: string, updates: {
+      prompt?: string;
+      schedule?: string;
+      projectPath?: string;
+      autonomous?: boolean;
+      notifications?: { telegram: boolean; slack: boolean };
+    }) =>
+      ipcRenderer.invoke('scheduler:updateTask', taskId, updates),
     runTask: (taskId: string) =>
       ipcRenderer.invoke('scheduler:runTask', taskId),
     getLogs: (taskId: string) =>
       ipcRenderer.invoke('scheduler:getLogs', taskId),
     fixMcpPaths: () =>
       ipcRenderer.invoke('scheduler:fixMcpPaths'),
+    watchLogs: (taskId: string) =>
+      ipcRenderer.invoke('scheduler:watchLogs', taskId),
+    unwatchLogs: (taskId: string) =>
+      ipcRenderer.invoke('scheduler:unwatchLogs', taskId),
+    onLogData: (callback: (event: { taskId: string; data: string }) => void) => {
+      const listener = (_: unknown, event: { taskId: string; data: string }) => callback(event);
+      ipcRenderer.on('scheduler:log-data', listener);
+      return () => ipcRenderer.removeListener('scheduler:log-data', listener);
+    },
+    onTaskStatus: (callback: (event: { taskId: string; status: string; summary?: string }) => void) => {
+      const listener = (_: unknown, event: { taskId: string; status: string; summary?: string }) => callback(event);
+      ipcRenderer.on('scheduler:task-status', listener);
+      return () => ipcRenderer.removeListener('scheduler:task-status', listener);
+    },
   },
 
   // Automations
@@ -455,6 +530,32 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // World (generative zones)
+  world: {
+    listZones: () =>
+      ipcRenderer.invoke('world:listZones'),
+    getZone: (zoneId: string) =>
+      ipcRenderer.invoke('world:getZone', zoneId),
+    exportZone: (params: { zoneId: string; screenshot: string }) =>
+      ipcRenderer.invoke('world:exportZone', params),
+    importZone: () =>
+      ipcRenderer.invoke('world:importZone'),
+    confirmImport: (zone: unknown) =>
+      ipcRenderer.invoke('world:confirmImport', zone),
+    deleteZone: (zoneId: string) =>
+      ipcRenderer.invoke('world:deleteZone', zoneId),
+    onZoneUpdated: (callback: (zone: unknown) => void) => {
+      const listener = (_: unknown, zone: unknown) => callback(zone);
+      ipcRenderer.on('world:zoneUpdated', listener);
+      return () => ipcRenderer.removeListener('world:zoneUpdated', listener);
+    },
+    onZoneDeleted: (callback: (event: { id: string }) => void) => {
+      const listener = (_: unknown, event: { id: string }) => callback(event);
+      ipcRenderer.on('world:zoneDeleted', listener);
+      return () => ipcRenderer.removeListener('world:zoneDeleted', listener);
+    },
+  },
+
   // CLI Paths management
   cliPaths: {
     detect: () =>
@@ -468,12 +569,64 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Updates
   updates: {
     check: () => ipcRenderer.invoke('app:checkForUpdates'),
+    download: () => ipcRenderer.invoke('app:downloadUpdate'),
+    quitAndInstall: () => ipcRenderer.invoke('app:quitAndInstall'),
     openExternal: (url: string) => ipcRenderer.invoke('app:openExternal', url),
-    onUpdateAvailable: (callback: (info: { currentVersion: string; latestVersion: string; downloadUrl: string; releaseUrl: string; releaseNotes: string; hasUpdate: boolean }) => void) => {
+    onUpdateAvailable: (callback: (info: { currentVersion: string; latestVersion: string; releaseNotes: string; hasUpdate: boolean }) => void) => {
       const listener = (_: unknown, info: Parameters<typeof callback>[0]) => callback(info);
       ipcRenderer.on('app:update-available', listener);
       return () => ipcRenderer.removeListener('app:update-available', listener);
     },
+    onUpdateNotAvailable: (callback: (info: { currentVersion: string; latestVersion: string }) => void) => {
+      const listener = (_: unknown, info: Parameters<typeof callback>[0]) => callback(info);
+      ipcRenderer.on('app:update-not-available', listener);
+      return () => ipcRenderer.removeListener('app:update-not-available', listener);
+    },
+    onDownloadProgress: (callback: (progress: { percent: number; bytesPerSecond: number; transferred: number; total: number }) => void) => {
+      const listener = (_: unknown, progress: Parameters<typeof callback>[0]) => callback(progress);
+      ipcRenderer.on('app:update-progress', listener);
+      return () => ipcRenderer.removeListener('app:update-progress', listener);
+    },
+    onUpdateDownloaded: (callback: () => void) => {
+      const listener = () => callback();
+      ipcRenderer.on('app:update-downloaded', listener);
+      return () => ipcRenderer.removeListener('app:update-downloaded', listener);
+    },
+    onUpdateError: (callback: (error: string) => void) => {
+      const listener = (_: unknown, error: string) => callback(error);
+      ipcRenderer.on('app:update-error', listener);
+      return () => ipcRenderer.removeListener('app:update-error', listener);
+    },
+  },
+
+  // Native Claude memory (reads ~/.claude/projects/*/memory/)
+  memory: {
+    listProjects: () =>
+      ipcRenderer.invoke('memory:list-projects'),
+    readFile: (filePath: string) =>
+      ipcRenderer.invoke('memory:read-file', filePath),
+    writeFile: (filePath: string, content: string) =>
+      ipcRenderer.invoke('memory:write-file', filePath, content),
+    createFile: (memoryDir: string, fileName: string, content?: string) =>
+      ipcRenderer.invoke('memory:create-file', memoryDir, fileName, content ?? ''),
+    deleteFile: (filePath: string) =>
+      ipcRenderer.invoke('memory:delete-file', filePath),
+  },
+
+  // Obsidian vault (read-only browsing, multi-vault)
+  obsidian: {
+    scan: () => ipcRenderer.invoke('obsidian:scan'),
+    readFile: (filePath: string, vaultPath: string) => ipcRenderer.invoke('obsidian:readFile', filePath, vaultPath),
+    writeFile: (filePath: string, content: string, vaultPath: string) => ipcRenderer.invoke('obsidian:writeFile', filePath, content, vaultPath),
+    getVaultInfo: () => ipcRenderer.invoke('obsidian:getVaultInfo'),
+    detectVault: (projectPath: string) => ipcRenderer.invoke('obsidian:detectVault', projectPath),
+    addVault: (vaultPath: string) => ipcRenderer.invoke('obsidian:addVault', vaultPath),
+    removeVault: (vaultPath: string) => ipcRenderer.invoke('obsidian:removeVault', vaultPath),
+  },
+
+  // API
+  api: {
+    getToken: () => ipcRenderer.invoke('api:getToken') as Promise<string>,
   },
 
   // Platform info

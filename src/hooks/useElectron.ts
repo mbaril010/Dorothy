@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
-import type { AgentStatus, AgentEvent, ElectronAPI, AgentCharacter } from '@/types/electron';
+import { useEffect, useState, useCallback, useMemo } from 'react';
+import type { AgentStatus, AgentEvent, ElectronAPI, AgentCharacter, AgentProvider } from '@/types/electron';
 
 // Check if we're running in Electron
 export const isElectron = (): boolean => {
@@ -54,6 +54,9 @@ export function useElectronAgents() {
     name?: string;
     secondaryProjectPath?: string;
     skipPermissions?: boolean;
+    provider?: AgentProvider;
+    localModel?: string;
+    obsidianVaultPaths?: string[];
   }) => {
     if (!isElectron()) {
       throw new Error('Electron API not available');
@@ -86,7 +89,7 @@ export function useElectronAgents() {
   const startAgent = useCallback(async (
     id: string,
     prompt: string,
-    options?: { model?: string; resume?: boolean }
+    options?: { model?: string; resume?: boolean; provider?: AgentProvider; localModel?: string }
   ) => {
     if (!isElectron()) {
       throw new Error('Electron API not available');
@@ -182,8 +185,23 @@ export function useElectronAgents() {
 
 // Hook for skill management via Electron IPC
 export function useElectronSkills() {
-  const [installedSkills, setInstalledSkills] = useState<string[]>([]);
+  const [installedSkillsByProvider, setInstalledSkillsByProvider] = useState<Record<string, string[]>>({});
   const [isLoading, setIsLoading] = useState(true);
+
+  // Flat list derived from all providers (backward compat)
+  const installedSkills = useMemo(() => {
+    const all = new Set<string>();
+    for (const skills of Object.values(installedSkillsByProvider)) {
+      for (const s of skills) all.add(s);
+    }
+    return Array.from(all);
+  }, [installedSkillsByProvider]);
+
+  const isSkillInstalledOn = useCallback((name: string, provider: string): boolean => {
+    const skills = installedSkillsByProvider[provider];
+    if (!skills) return false;
+    return skills.some(s => s.toLowerCase() === name.toLowerCase());
+  }, [installedSkillsByProvider]);
 
   const fetchInstalledSkills = useCallback(async () => {
     if (!isElectron()) {
@@ -192,8 +210,8 @@ export function useElectronSkills() {
     }
 
     try {
-      const skills = await window.electronAPI!.skill.listInstalled();
-      setInstalledSkills(skills);
+      const byProvider = await window.electronAPI!.skill.listInstalledAll();
+      setInstalledSkillsByProvider(byProvider);
     } catch (error) {
       console.error('Failed to fetch installed skills:', error);
     } finally {
@@ -210,15 +228,25 @@ export function useElectronSkills() {
     return result;
   }, [fetchInstalledSkills]);
 
+  const linkToProvider = useCallback(async (skillName: string, providerId: string) => {
+    if (!isElectron()) {
+      throw new Error('Electron API not available');
+    }
+    return window.electronAPI!.skill.linkToProvider({ skillName, providerId });
+  }, []);
+
   useEffect(() => {
     fetchInstalledSkills();
   }, [fetchInstalledSkills]);
 
   return {
     installedSkills,
+    installedSkillsByProvider,
+    isSkillInstalledOn,
     isLoading,
     isElectron: isElectron(),
     installSkill,
+    linkToProvider,
     refresh: fetchInstalledSkills,
   };
 }

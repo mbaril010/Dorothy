@@ -2,7 +2,7 @@
 
 ![Dorothy](screenshots/background-2.png)
 
-A beautiful desktop app to orchestrate your [Claude Code](https://claude.ai/code) agents. Deploy, monitor, and debug — all from one delightful interface. Free and open source.
+A beautiful desktop app to orchestrate your [Claude Code](https://claude.ai/code) ,[Codex](https://chatgpt.com/codex), [Gemini](https://geminicli.com/) and local agents. Deploy, monitor, and debug — all from one delightful interface. Free and open source.
 
 ![Dorothy Dashboard](screenshots/0.png)
 
@@ -16,6 +16,7 @@ A beautiful desktop app to orchestrate your [Claude Code](https://claude.ai/code
 - [Remote Control](#remote-control)
 - [Vault](#vault)
 - [SocialData (Twitter/X)](#socialdata-twitterx)
+- [Google Workspace](#google-workspace)
 - [MCP Servers & Tools](#mcp-servers--tools)
 - [Installation](#installation)
 - [Architecture](#architecture)
@@ -30,7 +31,7 @@ A beautiful desktop app to orchestrate your [Claude Code](https://claude.ai/code
 
 ## Why Dorothy
 
-Claude Code is powerful — but it runs one agent at a time, in one terminal. Dorothy removes that limitation:
+AI CLI tools are powerful — but it runs one agent at a time, in one terminal. Dorothy removes that limitation:
 
 - **Run 10+ agents simultaneously** across different projects and codebases
 - **Automate agent workflows** — trigger agents on GitHub PRs, issues, and external events
@@ -45,7 +46,7 @@ Claude Code is powerful — but it runs one agent at a time, in one terminal. Do
 
 ### Parallel Agent Management
 
-Run multiple Claude Code agents simultaneously, each in its own isolated PTY terminal session. Agents operate independently across different projects, codebases, and tasks.
+Run multiple agents simultaneously, each in its own isolated PTY terminal session. Agents operate independently across different projects, codebases, and tasks.
 
 ![Agents View](screenshots/agetns.png)
 
@@ -89,15 +90,6 @@ Extend agent capabilities with skills from [skills.sh](https://skills.sh) and th
 - **External Integrations**: GitHub, GitLab, Jira, Figma, Slack, Vercel
 - **Development Workflows**: Commit commands, PR review tools
 - Install skills per-agent for specialized task handling
-
-### Persistent Memory
-
-Powered by [claude-mem](https://github.com/thedotmack/claude-mem), agents retain decisions, learnings, and context across sessions.
-
-- Automatic memory capture of tool uses, decisions, and learnings
-- Cross-session context persistence — agents build on previous work
-- AI-powered summarization for efficient storage
-- Works across all Claude Code sessions, not just Dorothy
 
 ### Settings Management
 
@@ -378,6 +370,42 @@ All tools support cursor-based pagination for large result sets.
 
 ---
 
+## Google Workspace
+
+Access Gmail, Drive, Sheets, Docs, Calendar, and more directly from your agents via the [Google Workspace CLI](https://github.com/googleworkspace/cli) (`gws`). Dorothy integrates `gws` as an MCP server so agents can read emails, manage files, create documents, and interact with Google APIs.
+
+### Setup
+
+1. Install **gcloud CLI** — required for OAuth setup (`brew install google-cloud-sdk`)
+2. Install **gws CLI** — `npm install -g @googleworkspace/cli`
+3. Open **Settings → Google Workspace** and follow the guided setup:
+   - Click **Auth Setup** to create a Google Cloud project and OAuth client
+   - Click **Auth Login** to authenticate with your Google account
+   - Enable the toggle to register the MCP server with your agents
+4. Optionally install **Agent Skills** for 100+ specialized Google Workspace skills
+
+### Features
+
+- **MCP server**: Runs `gws mcp` over stdio, exposing Google APIs as tools (10-80 tools per service)
+- **Multi-provider**: MCP server registered with all configured providers (Claude, Codex, Gemini)
+- **Service badges**: Settings page shows connected services with per-service access levels (READ / R/W)
+- **Agent skills**: Detects and lists installed `gws-*` skills (e.g., `gws-gmail`, `gws-drive`, `gws-calendar`)
+- **Update Access**: Re-run `gws auth login` to add or change OAuth scopes without re-running setup
+
+### Default Services
+
+| Service | Scope | Description |
+|---------|-------|-------------|
+| **Gmail** | Read/Write | Send, read, and manage email |
+| **Drive** | Read/Write | Manage files, folders, and shared drives |
+| **Sheets** | Read/Write | Read and write spreadsheets |
+| **Calendar** | Read/Write | Manage calendars and events |
+| **Docs** | Read/Write | Read and write documents |
+
+Additional services (Slides, Tasks, Chat, People, Forms, Keep) are available based on OAuth scopes.
+
+---
+
 ## MCP Servers & Tools
 
 Dorothy exposes **five MCP (Model Context Protocol) servers** with **40+ tools** for programmatic agent control. These are used internally by the Super Agent and can be registered in any Claude Code session via `~/.claude/settings.json`.
@@ -652,7 +680,9 @@ dorothy/
 │   │   ├── claude-service.ts      # Claude Code CLI integration
 │   │   ├── hooks-manager.ts       # Git hooks management
 │   │   └── kanban-automation.ts   # Task → Agent auto-assignment
-│   └── handlers/                  # IPC handlers
+│   ├── handlers/                  # IPC handlers
+│   │   ├── ipc-handlers.ts       # Agent, skill, plugin IPC
+│   │   └── gws-handlers.ts       # Google Workspace integration
 ├── mcp-orchestrator/              # MCP server (orchestration)
 │   └── src/tools/
 │       ├── agents.ts              # Agent management tools (9)
@@ -769,4 +799,3 @@ This project is open source and available under the [MIT License](LICENSE).
 
 - [Anthropic](https://anthropic.com) for Claude Code
 - [skills.sh](https://skills.sh) for the skills ecosystem
-- [claude-mem](https://github.com/thedotmack/claude-mem) for persistent memory

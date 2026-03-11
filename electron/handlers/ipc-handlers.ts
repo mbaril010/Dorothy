@@ -1,5 +1,8 @@
 import { ipcMain, dialog, shell } from 'electron';
-import { checkForUpdates } from '../services/update-checker';
+import { checkForUpdates, downloadUpdate, quitAndInstall } from '../services/update-checker';
+import { registerMemoryHandlers } from './memory-handlers';
+import { registerObsidianHandlers } from './obsidian-handlers';
+import { registerGwsHandlers } from './gws-handlers';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -9,8 +12,11 @@ import TelegramBot from 'node-telegram-bot-api';
 import { App as SlackApp, LogLevel } from '@slack/bolt';
 
 // Import types
-import type { AgentStatus, WorktreeConfig, AgentCharacter, AppSettings } from '../types';
+import type { AgentStatus, WorktreeConfig, AgentCharacter, AppSettings, AgentProvider } from '../types';
 import { buildFullPath } from '../utils/path-builder';
+import { decodeProjectPath } from '../utils/decode-project-path';
+import { getProvider, getAllProviders } from '../providers';
+import { writeProgrammaticInput } from '../core/pty-manager';
 
 // Dependencies interface for dependency injection
 export interface IpcHandlerDependencies {
@@ -61,8 +67,22 @@ export function registerIpcHandlers(deps: IpcHandlerDependencies): void {
   registerAppSettingsHandlers(deps);
   registerUpdateHandlers();
   // Orchestrator handlers are registered separately in services/mcp-orchestrator.ts
+  registerTasmaniaHandlers(deps);
   registerFileSystemHandlers(deps);
   registerShellHandlers(deps);
+  registerMemoryHandlers();
+  registerObsidianHandlers({ getAppSettings: deps.getAppSettings, setAppSettings: deps.setAppSettings, saveAppSettings: deps.saveAppSettings });
+  registerGwsHandlers({ getAppSettings: deps.getAppSettings, setAppSettings: deps.setAppSettings, saveAppSettings: deps.saveAppSettings });
+  registerApiTokenHandler();
+}
+
+// ============== API Token IPC Handler ==============
+
+function registerApiTokenHandler(): void {
+  ipcMain.handle('api:getToken', async () => {
+    const { getApiToken } = await import('../services/api-server');
+    return getApiToken();
+  });
 }
 
 // ============== PTY Terminal IPC Handlers ==============
@@ -157,6 +177,9 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     name?: string;
     secondaryProjectPath?: string;
     skipPermissions?: boolean;
+    provider?: 'claude' | 'local';
+    localModel?: string;
+    obsidianVaultPaths?: string[];
   }) => {
     const id = uuidv4();
     const shell = '/bin/bash';
@@ -174,6 +197,9 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     // Create git worktree if enabled
     if (config.worktree?.enabled && config.worktree?.branchName) {
       branchName = config.worktree.branchName;
+      if (!/^[a-zA-Z0-9._\-\/]+$/.test(branchName)) {
+        throw new Error('Invalid branch name');
+      }
       const worktreesDir = path.join(cwd, '.worktrees');
       worktreePath = path.join(worktreesDir, branchName);
 
@@ -194,13 +220,13 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
 
           // Check if branch already exists
           try {
-            execSync(`git rev-parse --verify ${branchName}`, { cwd, stdio: 'pipe' });
+            execSync(`git rev-parse --verify '${branchName}'`, { cwd, stdio: 'pipe' });
             // Branch exists, create worktree using existing branch
-            execSync(`git worktree add "${worktreePath}" ${branchName}`, { cwd, stdio: 'pipe' });
-          
+            execSync(`git worktree add '${worktreePath}' '${branchName}'`, { cwd, stdio: 'pipe' });
+
           } catch {
             // Branch doesn't exist, create worktree with new branch
-            execSync(`git worktree add -b ${branchName} "${worktreePath}"`, { cwd, stdio: 'pipe' });
+            execSync(`git worktree add -b '${branchName}' '${worktreePath}'`, { cwd, stdio: 'pipe' });
           
           }
         }
@@ -221,14 +247,9 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     const currentSettings = getAppSettings();
     const cliExtraPaths: string[] = [];
     if (currentSettings.cliPaths) {
-      if (currentSettings.cliPaths.claude) {
-        cliExtraPaths.push(path.dirname(currentSettings.cliPaths.claude));
-      }
-      if (currentSettings.cliPaths.gh) {
-        cliExtraPaths.push(path.dirname(currentSettings.cliPaths.gh));
-      }
-      if (currentSettings.cliPaths.node) {
-        cliExtraPaths.push(path.dirname(currentSettings.cliPaths.node));
+      for (const key of ['claude', 'codex', 'gemini', 'gws', 'gh', 'node'] as const) {
+        const val = (currentSettings.cliPaths as unknown as Record<string, string>)[key];
+        if (val) cliExtraPaths.push(path.dirname(val));
       }
       if (currentSettings.cliPaths.additionalPaths) {
         cliExtraPaths.push(...currentSettings.cliPaths.additionalPaths.filter(Boolean));
@@ -237,6 +258,18 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     const fullPath = buildFullPath(cliExtraPaths);
 
     // Create PTY for this agent
+    // Strip nested-session env vars to prevent errors
+    const cleanEnv = { ...process.env as { [key: string]: string } };
+    // Each provider may have env vars to delete; always delete CLAUDECODE for Claude
+    delete cleanEnv['CLAUDECODE'];
+
+    // Always include world-builder skill so agents can generate game zones
+    const allSkills = [...new Set([...config.skills, 'world-builder'])];
+
+    // Get provider-specific env vars
+    const agentProvider = getProvider(config.provider);
+    const providerEnvVars = agentProvider.getPtyEnvVars(id, config.projectPath, allSkills);
+
     let ptyProcess: pty.IPty;
     try {
       ptyProcess = pty.spawn(shell, ['-l'], {
@@ -245,11 +278,9 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
         rows: 30,
         cwd,
         env: {
-          ...process.env as { [key: string]: string },
+          ...cleanEnv,
           PATH: fullPath,
-          CLAUDE_SKILLS: config.skills.join(','),
-          CLAUDE_AGENT_ID: id,
-          CLAUDE_PROJECT_PATH: config.projectPath,
+          ...providerEnvVars,
         },
       });
       console.log(`PTY created successfully for agent ${id}, PID: ${ptyProcess.pid}`);
@@ -286,6 +317,9 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
       character: config.character || 'robot',
       name: config.name || `Agent ${id.slice(0, 4)}`,
       skipPermissions: config.skipPermissions || false,
+      provider: config.provider || 'claude',
+      localModel: config.localModel,
+      obsidianVaultPaths: config.obsidianVaultPaths || [],
     };
     agents.set(id, status);
 
@@ -293,22 +327,23 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     saveAgents();
 
     // Forward PTY output to renderer
+    // Guard: skip if this PTY was replaced (e.g. local provider recreates PTY in agent:start)
     ptyProcess.onData((data) => {
       const agent = agents.get(id);
-      if (agent) {
-        agent.output.push(data);
-        agent.lastActivity = new Date().toISOString();
+      if (!agent || agent.ptyId !== ptyId) return;
 
-        // Capture Super Agent output for Telegram
-        if (getSuperAgentTelegramTask() && isSuperAgent(agent)) {
-          const buffer = getSuperAgentOutputBuffer();
-          buffer.push(data);
-          // Keep buffer reasonable
-          if (buffer.length > 200) {
-            setSuperAgentOutputBuffer(buffer.slice(-100));
-          }
+      agent.output.push(data);
+      agent.lastActivity = new Date().toISOString();
+
+      // Capture Super Agent output for Telegram
+      if (getSuperAgentTelegramTask() && isSuperAgent(agent)) {
+        const buffer = getSuperAgentOutputBuffer();
+        buffer.push(data);
+        if (buffer.length > 200) {
+          setSuperAgentOutputBuffer(buffer.slice(-100));
         }
       }
+
       getMainWindow()?.webContents.send('agent:output', {
         type: 'output',
         agentId: id,
@@ -319,24 +354,23 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     });
 
     ptyProcess.onExit(({ exitCode }) => {
-      console.log(`Agent ${id} PTY exited with code ${exitCode}`);
       const agent = agents.get(id);
-      if (agent) {
+      // Skip status update if this PTY was replaced by a newer one
+      if (agent && agent.ptyId === ptyId) {
+        console.log(`Agent ${id} PTY exited with code ${exitCode}`);
         const newStatus = exitCode === 0 ? 'completed' : 'error';
         agent.status = newStatus;
         agent.lastActivity = new Date().toISOString();
-        // Send notification
         handleStatusChangeNotification(agent, newStatus);
+        getMainWindow()?.webContents.send('agent:complete', {
+          type: 'complete',
+          agentId: id,
+          ptyId,
+          exitCode,
+          timestamp: new Date().toISOString(),
+        });
       }
-      // Remove PTY from map since it's exited
       ptyProcesses.delete(ptyId);
-      getMainWindow()?.webContents.send('agent:complete', {
-        type: 'complete',
-        agentId: id,
-        ptyId,
-        exitCode,
-        timestamp: new Date().toISOString(),
-      });
     });
 
     return { ...status, ptyId };
@@ -346,76 +380,183 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
   ipcMain.handle('agent:start', async (_event, { id, prompt, options }: {
     id: string;
     prompt: string;
-    options?: { model?: string; resume?: boolean }
+    options?: { model?: string; resume?: boolean; provider?: AgentProvider; localModel?: string }
   }) => {
     const agent = agents.get(id);
     if (!agent) throw new Error('Agent not found');
 
     // Initialize PTY if agent was restored from disk and doesn't have one
+    let ptyJustCreated = false;
     if (!agent.ptyId || !ptyProcesses.has(agent.ptyId)) {
       console.log(`Agent ${id} needs PTY initialization`);
       const ptyId = await initAgentPty(agent);
       agent.ptyId = ptyId;
+      ptyJustCreated = true;
     }
 
-    const ptyProcess = ptyProcesses.get(agent.ptyId);
+    // Determine provider — prefer agent-level, fallback to options, default to 'claude'
+    const provider = agent.provider || options?.provider || 'claude';
+    const localModel = agent.localModel || options?.localModel;
+
+    // ── For local provider, recreate PTY with Tasmania env vars baked in ──
+    if (provider === 'local') {
+      const { getTasmaniaStatus } = require('../services/tasmania-client') as typeof import('../services/tasmania-client');
+
+      const tasmaniaStatus = await getTasmaniaStatus();
+      if (tasmaniaStatus.status !== 'running' || !tasmaniaStatus.endpoint) {
+        throw new Error('Tasmania is not running or no model is loaded. Start a model in Tasmania settings first.');
+      }
+
+      // Strip /v1 suffix from endpoint. Tasmania's TerminalPanel uses
+      // `http://127.0.0.1:${port}` (no /v1), because Claude Code's SDK
+      // appends /v1/messages itself. Including /v1 causes double-pathing
+      // (http://…/v1/v1/messages) which breaks all API calls.
+      const endpoint = tasmaniaStatus.endpoint!.replace(/\/v1\/?$/, '');
+      const model = localModel || tasmaniaStatus.modelName || 'default';
+
+      // Kill the existing PTY and recreate with env vars in the process environment.
+      // Writing `export ...` to an already-running shell is racy — the shell may not
+      // process the export before the claude command runs. Baking vars into pty.spawn()
+      // guarantees they're in the process environment from the start.
+      const oldPty = ptyProcesses.get(agent.ptyId!);
+      if (oldPty) {
+        oldPty.kill();
+        ptyProcesses.delete(agent.ptyId!);
+      }
+
+      const currentSettings = getAppSettings();
+      const extraPaths: string[] = [];
+      if (currentSettings.cliPaths) {
+        for (const key of ['claude', 'codex', 'gemini', 'gws', 'gh', 'node'] as const) {
+          const val = (currentSettings.cliPaths as unknown as Record<string, string>)[key];
+          if (val) extraPaths.push(path.dirname(val));
+        }
+        if (currentSettings.cliPaths.additionalPaths) extraPaths.push(...currentSettings.cliPaths.additionalPaths.filter(Boolean));
+      }
+      const fullPathForLocal = buildFullPath(extraPaths);
+
+      const cleanEnvLocal = { ...process.env as { [key: string]: string } };
+      delete cleanEnvLocal['CLAUDECODE'];
+
+      const workingDir = agent.worktreePath || agent.projectPath;
+      const cwd = fs.existsSync(workingDir) ? workingDir : os.homedir();
+
+      // Local provider uses Claude provider env vars + Tasmania env vars
+      const localProviderEnvVars = getProvider('claude').getPtyEnvVars(agent.id, agent.projectPath, agent.skills);
+
+      const newPty = pty.spawn('/bin/bash', ['-l'], {
+        name: 'xterm-256color',
+        cols: 120,
+        rows: 30,
+        cwd,
+        env: {
+          ...cleanEnvLocal,
+          PATH: fullPathForLocal,
+          ...localProviderEnvVars,
+          // Tasmania-specific env vars:
+          // - ANTHROPIC_BASE_URL without /v1 (SDK appends /v1/messages)
+          // - ANTHROPIC_MODEL with the raw local model name
+          ANTHROPIC_BASE_URL: endpoint,
+          ANTHROPIC_MODEL: model,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        },
+      });
+
+      const newPtyId = uuidv4();
+      ptyProcesses.set(newPtyId, newPty);
+      agent.ptyId = newPtyId;
+
+      // Re-attach event handlers
+      newPty.onData((data) => {
+        const agentData = agents.get(id);
+        if (agentData) {
+          agentData.output.push(data);
+          agentData.lastActivity = new Date().toISOString();
+          if (getSuperAgentTelegramTask() && isSuperAgent(agentData)) {
+            const buffer = getSuperAgentOutputBuffer();
+            buffer.push(data);
+            if (buffer.length > 200) {
+              setSuperAgentOutputBuffer(buffer.slice(-100));
+            }
+          }
+        }
+        getMainWindow()?.webContents.send('agent:output', {
+          type: 'output',
+          agentId: id,
+          ptyId: newPtyId,
+          data,
+          timestamp: new Date().toISOString(),
+        });
+      });
+
+      newPty.onExit(({ exitCode }) => {
+        console.log(`Agent ${id} PTY exited with code ${exitCode}`);
+        const agentData = agents.get(id);
+        if (agentData) {
+          const newStatus = exitCode === 0 ? 'completed' : 'error';
+          agentData.status = newStatus;
+          agentData.lastActivity = new Date().toISOString();
+          handleStatusChangeNotification(agentData, newStatus);
+        }
+        ptyProcesses.delete(newPtyId);
+        getMainWindow()?.webContents.send('agent:complete', {
+          type: 'complete',
+          agentId: id,
+          ptyId: newPtyId,
+          exitCode,
+          timestamp: new Date().toISOString(),
+        });
+      });
+    }
+
+    // Get the (potentially recreated) PTY process
+    const ptyProcess = ptyProcesses.get(agent.ptyId!);
     if (!ptyProcess) throw new Error('PTY not found');
 
-    // Build Claude Code command — use full path from settings if configured
+    // ── Build CLI command via provider ─────────────────────────────
     const appSettingsForCommand = getAppSettings();
-    let command = (appSettingsForCommand.cliPaths?.claude) || 'claude';
+    const cliProvider = getProvider(provider);
+    const binaryPath = cliProvider.resolveBinaryPath(appSettingsForCommand);
 
     // Check if this is the Super Agent (orchestrator)
     const isSuperAgentCheck = agent.name?.toLowerCase().includes('super agent') ||
                       agent.name?.toLowerCase().includes('orchestrator');
 
-    // Add explicit MCP config for Super Agent to ensure orchestrator tools are loaded
-    if (isSuperAgentCheck) {
+    // Resolve MCP config path — pass for ALL agents using flag strategy (Claude)
+    let mcpConfigPath: string | undefined;
+    let systemPromptFile: string | undefined;
+    if (cliProvider.getMcpConfigStrategy() === 'flag') {
       const { app } = await import('electron');
-      const mcpConfigPath = path.join(app.getPath('home'), '.claude', 'mcp.json');
-      if (fs.existsSync(mcpConfigPath)) {
-        command += ` --mcp-config ${mcpConfigPath}`;
+      const possibleMcpPath = path.join(app.getPath('home'), '.claude', 'mcp.json');
+      if (fs.existsSync(possibleMcpPath)) {
+        mcpConfigPath = possibleMcpPath;
       }
-      // Add super agent instructions (read via Node.js, not cat - asar compatibility)
+    }
+
+    // Super Agent-specific: system prompt file
+    if (isSuperAgentCheck) {
       const { getSuperAgentInstructionsPath } = await import('../utils');
       const superAgentInstructionsPath = getSuperAgentInstructionsPath();
       if (fs.existsSync(superAgentInstructionsPath)) {
-      
-        command += ` --append-system-prompt-file ${superAgentInstructionsPath}`;
+        systemPromptFile = superAgentInstructionsPath;
       }
     }
 
-    if (options?.model) {
-      command += ` --model ${options.model}`;
-    }
+    const allAgentSkills = [...new Set([...(agent.skills || []), 'world-builder'])];
 
-    // Add verbose flag if enabled in app settings
-    const currentAppSettings = getAppSettings();
-    if (currentAppSettings.verboseModeEnabled) {
-      command += ' --verbose';
-    }
-
-    // Add skip permissions flag if enabled
-    if (agent.skipPermissions) {
-      command += ' --dangerously-skip-permissions';
-    }
-
-    // Add secondary project path with --add-dir flag if set
-    if (agent.secondaryProjectPath) {
-      const escapedSecondaryPath = agent.secondaryProjectPath.replace(/'/g, "'\\''");
-      command += ` --add-dir '${escapedSecondaryPath}'`;
-    }
-
-    // Build the final prompt with skills directive if agent has skills
-    let finalPrompt = prompt;
-    if (agent.skills && agent.skills.length > 0 && !isSuperAgentCheck) {
-      const skillsList = agent.skills.join(', ');
-      finalPrompt = `[IMPORTANT: Use these skills for this session: ${skillsList}. Invoke them with /<skill-name> when relevant to the task.] ${prompt}`;
-    }
-
-    // Add the prompt (escape single quotes)
-    const escapedPrompt = finalPrompt.replace(/'/g, "'\\''");
-    command += finalPrompt ? ` '${escapedPrompt}'` : '';
+    const command = cliProvider.buildInteractiveCommand({
+      binaryPath,
+      prompt,
+      model: (provider !== 'local') ? options?.model : undefined,
+      verbose: appSettingsForCommand.verboseModeEnabled,
+      skipPermissions: agent.skipPermissions,
+      secondaryProjectPath: agent.secondaryProjectPath,
+      obsidianVaultPaths: agent.obsidianVaultPaths,
+      mcpConfigPath,
+      systemPromptFile,
+      skills: allAgentSkills,
+      isSuperAgent: isSuperAgentCheck,
+    });
 
     // Update status
     agent.status = 'running';
@@ -426,9 +567,21 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
     const workingPath = (agent.worktreePath || agent.projectPath).replace(/'/g, "'\\''");
     const fullCommand = `cd '${workingPath}' && ${command}`;
 
-    ptyProcess.write(fullCommand);
-    ptyProcess.write('\r');
-    
+    // Wait for the shell to initialize before writing the command.
+    // A freshly-spawned PTY needs time for bash to start up (~200ms).
+    // Local provider always recreates the PTY, so it always needs the delay.
+    const needsDelay = ptyJustCreated || provider === 'local';
+    if (needsDelay) {
+      await new Promise<void>((resolve) => {
+        setTimeout(() => {
+          writeProgrammaticInput(ptyProcess, fullCommand);
+          resolve();
+        }, 500);
+      });
+    } else {
+      writeProgrammaticInput(ptyProcess, fullCommand);
+    }
+
     // Save updated status
     saveAgents();
 
@@ -542,7 +695,7 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
       try {
         const { execSync } = await import('child_process');
         console.log(`Removing worktree at ${agent.worktreePath}`);
-        execSync(`git worktree remove "${agent.worktreePath}" --force`, { cwd: agent.projectPath, stdio: 'pipe' });
+        execSync(`git worktree remove '${agent.worktreePath}' --force`, { cwd: agent.projectPath, stdio: 'pipe' });
         console.log(`Worktree removed successfully`);
       } catch (err) {
         console.warn(`Failed to remove worktree:`, err);
@@ -626,17 +779,30 @@ function registerAgentHandlers(deps: IpcHandlerDependencies): void {
 function registerSkillHandlers(deps: IpcHandlerDependencies): void {
   const { skillPtyProcesses, getMainWindow } = deps;
 
-  // Start skill installation (creates interactive PTY)
+  // Start skill installation (spawns npx directly — no login shell to avoid
+  // users' zshrc/compdef issues breaking the install flow)
   ipcMain.handle('skill:install-start', async (_event, { repo, cols, rows }: { repo: string; cols?: number; rows?: number }) => {
     const id = uuidv4();
-    const shell = process.env.SHELL || '/bin/zsh';
 
-    const ptyProcess = pty.spawn(shell, ['-l'], {
+    // Parse repo to get the GitHub URL and skill name
+    // Format: "owner/repo/skill-name" or "owner/repo" for full repo install
+    const parts = repo.split('/');
+    let npxArgs: string[];
+    if (parts.length >= 3) {
+      const repoPath = `${parts[0]}/${parts[1]}`;
+      const skillName = parts.slice(2).join('/');
+      npxArgs = ['skills', 'add', `https://github.com/${repoPath}`, '--skill', skillName];
+    } else {
+      npxArgs = ['skills', 'add', `https://github.com/${repo}`];
+    }
+
+    const fullPath = buildFullPath();
+    const ptyProcess = pty.spawn('npx', npxArgs, {
       name: 'xterm-256color',
       cols: cols || 80,
       rows: rows || 24,
       cwd: os.homedir(),
-      env: process.env as { [key: string]: string },
+      env: { ...process.env, PATH: fullPath } as { [key: string]: string },
     });
 
     skillPtyProcesses.set(id, ptyProcess);
@@ -651,25 +817,6 @@ function registerSkillHandlers(deps: IpcHandlerDependencies): void {
       getMainWindow()?.webContents.send('skill:pty-exit', { id, exitCode });
       skillPtyProcesses.delete(id);
     });
-
-    // Send the install command after a short delay to let shell initialize
-    // Parse repo to get the GitHub URL and skill name
-    // Format: "owner/repo/skill-name" or "owner/repo" for full repo install
-    const parts = repo.split('/');
-    let command: string;
-    if (parts.length >= 3) {
-      // Has skill name: owner/repo/skill-name
-      const repoPath = `${parts[0]}/${parts[1]}`;
-      const skillName = parts.slice(2).join('/');
-      command = `npx skills add https://github.com/${repoPath} --skill ${skillName}`;
-    } else {
-      // Just repo: owner/repo (install all skills from repo)
-      command = `npx skills add https://github.com/${repo}`;
-    }
-    setTimeout(() => {
-      ptyProcess.write(command);
-      ptyProcess.write('\r');
-    }, 500);
 
     return { id, repo };
   });
@@ -705,6 +852,37 @@ function registerSkillHandlers(deps: IpcHandlerDependencies): void {
     return { success: false, error: 'PTY not found' };
   });
 
+  // Fetch skills marketplace from skills.sh (server-side to avoid CORS)
+  ipcMain.handle('skill:fetch-marketplace', async () => {
+    try {
+      const res = await fetch('https://skills.sh/', {
+        headers: { 'User-Agent': 'Dorothy/1.0' },
+      });
+      if (!res.ok) return { skills: null };
+
+      const html = await res.text();
+      const match = html.match(/initialSkills.*?(\[\{.*?\}\])/);
+      if (!match) return { skills: null };
+
+      const raw = match[1].replace(/\\"/g, '"');
+      const allSkills: { source: string; name: string; installs: number }[] = JSON.parse(raw);
+
+      const skills = allSkills.slice(0, 300).map((s, i) => ({
+        rank: i + 1,
+        name: s.name,
+        repo: s.source,
+        installs: s.installs >= 1000
+          ? `${(s.installs / 1000).toFixed(1).replace(/\.0$/, '')}K`
+          : String(s.installs),
+        installsNum: s.installs,
+      }));
+
+      return { skills };
+    } catch {
+      return { skills: null };
+    }
+  });
+
   // Legacy install (kept for backwards compatibility)
   ipcMain.handle('skill:install', async (_event, repo: string) => {
     // Just start the installation and return immediately
@@ -712,7 +890,7 @@ function registerSkillHandlers(deps: IpcHandlerDependencies): void {
     return { success: true, message: 'Use skill:install-start for interactive installation' };
   });
 
-  // Get installed skills from Claude config
+  // Get installed skills from Claude config (backward compat — flat list)
   ipcMain.handle('skill:list-installed', async () => {
     try {
       const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
@@ -731,6 +909,62 @@ function registerSkillHandlers(deps: IpcHandlerDependencies): void {
       return [];
     }
   });
+
+  // Get installed skills per provider
+  ipcMain.handle('skill:list-installed-all', async () => {
+    const providers = getAllProviders();
+    const result: Record<string, string[]> = {};
+    for (const p of providers) {
+      result[p.id] = p.getInstalledSkills();
+    }
+    return result;
+  });
+
+  // Symlink a skill from Claude's skill dir to another provider's skill dir
+  ipcMain.handle('skill:link-to-provider', async (_event, { skillName, providerId }: { skillName: string; providerId: string }) => {
+    try {
+      // Source: the first Claude skill dir that contains the skill
+      const claudeProvider = getProvider('claude');
+      let sourcePath: string | null = null;
+      for (const dir of claudeProvider.getSkillDirectories()) {
+        const candidate = path.join(dir, skillName);
+        if (fs.existsSync(candidate)) {
+          sourcePath = candidate;
+          break;
+        }
+      }
+
+      if (!sourcePath) {
+        return { success: false, error: `Skill "${skillName}" not found in Claude skill directories` };
+      }
+
+      const targetProvider = getProvider(providerId as any);
+      const targetDirs = targetProvider.getSkillDirectories();
+      if (!targetDirs.length) {
+        return { success: false, error: `Provider "${providerId}" has no skill directories` };
+      }
+
+      const targetDir = targetDirs[0];
+      const targetPath = path.join(targetDir, skillName);
+
+      // Skip if already exists
+      if (fs.existsSync(targetPath)) {
+        return { success: true };
+      }
+
+      // Ensure parent dir exists
+      fs.mkdirSync(targetDir, { recursive: true });
+
+      // Create symlink
+      fs.symlinkSync(sourcePath, targetPath, 'dir');
+      console.log(`Linked skill "${skillName}" to ${providerId} at ${targetPath}`);
+
+      return { success: true };
+    } catch (err) {
+      console.error(`Failed to link skill "${skillName}" to ${providerId}:`, err);
+      return { success: false, error: String(err) };
+    }
+  });
 }
 
 // ============== Plugin IPC Handlers ==============
@@ -739,16 +973,28 @@ function registerPluginHandlers(deps: IpcHandlerDependencies): void {
   const { pluginPtyProcesses, getMainWindow } = deps;
 
   // Start plugin installation (creates interactive PTY)
+  // Start plugin installation (uses --no-rcs to skip shell rc files that may
+  // contain broken completions like compdef from other tools)
   ipcMain.handle('plugin:install-start', async (_event, { command, cols, rows }: { command: string; cols?: number; rows?: number }) => {
     const id = uuidv4();
     const shell = process.env.SHELL || '/bin/zsh';
 
-    const ptyProcess = pty.spawn(shell, ['-l'], {
+    // If the command starts with /, it's a Claude CLI slash command - prefix with 'claude'
+    const finalCommand = command.startsWith('/') ? `claude "${command}"` : command;
+    const fullPath = buildFullPath();
+
+    // Use -c to run the command directly, skipping rc files to avoid
+    // compdef/completion errors from the user's shell config
+    const shellArgs = shell.endsWith('zsh')
+      ? ['--no-rcs', '-c', finalCommand]
+      : ['-c', finalCommand];
+
+    const ptyProcess = pty.spawn(shell, shellArgs, {
       name: 'xterm-256color',
       cols: cols || 80,
       rows: rows || 24,
       cwd: os.homedir(),
-      env: process.env as { [key: string]: string },
+      env: { ...process.env, PATH: fullPath } as { [key: string]: string },
     });
 
     pluginPtyProcesses.set(id, ptyProcess);
@@ -763,14 +1009,6 @@ function registerPluginHandlers(deps: IpcHandlerDependencies): void {
       getMainWindow()?.webContents.send('plugin:pty-exit', { id, exitCode });
       pluginPtyProcesses.delete(id);
     });
-
-    // Send the install command after a short delay to let shell initialize
-    // If the command starts with /, it's a Claude CLI slash command - prefix with 'claude'
-    const finalCommand = command.startsWith('/') ? `claude "${command}"` : command;
-    setTimeout(() => {
-      ptyProcess.write(finalCommand);
-      ptyProcess.write('\r');
-    }, 500);
 
     return { id };
   });
@@ -1056,6 +1294,77 @@ function registerAppSettingsHandlers(deps: IpcHandlerDependencies): void {
     return { success: true };
   });
 
+  // Test X API credentials (OAuth 1.0a)
+  ipcMain.handle('xapi:test', async () => {
+    const appSettings = getAppSettings();
+    if (!appSettings.xApiKey || !appSettings.xApiSecret || !appSettings.xAccessToken || !appSettings.xAccessTokenSecret) {
+      return { success: false, error: 'All 4 X API credentials are required' };
+    }
+
+    try {
+      const crypto = require('crypto');
+      const https = require('https');
+
+      // OAuth 1.0a signing for GET /2/users/me
+      const method = 'GET';
+      const url = 'https://api.x.com/2/users/me';
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonce = crypto.randomBytes(16).toString('hex');
+
+      const percentEncode = (s: string) => encodeURIComponent(s).replace(/[!'()*]/g, (c: string) => '%' + c.charCodeAt(0).toString(16).toUpperCase());
+
+      const oauthParams: Record<string, string> = {
+        oauth_consumer_key: appSettings.xApiKey,
+        oauth_nonce: nonce,
+        oauth_signature_method: 'HMAC-SHA1',
+        oauth_timestamp: timestamp,
+        oauth_token: appSettings.xAccessToken,
+        oauth_version: '1.0',
+      };
+
+      const paramString = Object.keys(oauthParams).sort()
+        .map(k => `${percentEncode(k)}=${percentEncode(oauthParams[k])}`).join('&');
+      const sigBase = `${method}&${percentEncode(url)}&${percentEncode(paramString)}`;
+      const sigKey = `${percentEncode(appSettings.xApiSecret)}&${percentEncode(appSettings.xAccessTokenSecret)}`;
+      const signature = crypto.createHmac('sha1', sigKey).update(sigBase).digest('base64');
+      oauthParams['oauth_signature'] = signature;
+
+      const authHeader = 'OAuth ' + Object.keys(oauthParams).sort()
+        .map(k => `${percentEncode(k)}="${percentEncode(oauthParams[k])}"`).join(', ');
+
+      const result = await new Promise<{ success: boolean; username?: string; error?: string }>((resolve) => {
+        const req = https.request({
+          hostname: 'api.x.com',
+          port: 443,
+          path: '/2/users/me',
+          method: 'GET',
+          headers: { 'Authorization': authHeader, 'Accept': 'application/json' },
+        }, (res: import('http').IncomingMessage) => {
+          let data = '';
+          res.on('data', (chunk: string) => { data += chunk; });
+          res.on('end', () => {
+            if (res.statusCode === 200) {
+              try {
+                const parsed = JSON.parse(data);
+                resolve({ success: true, username: parsed.data?.username });
+              } catch {
+                resolve({ success: false, error: 'Invalid response' });
+              }
+            } else {
+              resolve({ success: false, error: `HTTP ${res.statusCode}: ${data.slice(0, 200)}` });
+            }
+          });
+        });
+        req.on('error', (err: Error) => resolve({ success: false, error: err.message }));
+        req.end();
+      });
+      return result;
+    } catch (err) {
+      console.error('X API test failed:', err);
+      return { success: false, error: String(err) };
+    }
+  });
+
   // Test SocialData API key
   ipcMain.handle('socialdata:test', async () => {
     const appSettings = getAppSettings();
@@ -1191,6 +1500,14 @@ function registerUpdateHandlers(): void {
     return checkForUpdates();
   });
 
+  ipcMain.handle('app:downloadUpdate', async () => {
+    return downloadUpdate();
+  });
+
+  ipcMain.handle('app:quitAndInstall', async () => {
+    quitAndInstall();
+  });
+
   ipcMain.handle('app:openExternal', async (_event, url: string) => {
     shell.openExternal(url);
     return { success: true };
@@ -1207,45 +1524,6 @@ function registerFileSystemHandlers(deps: IpcHandlerDependencies): void {
       const claudeDir = path.join(os.homedir(), '.claude', 'projects');
       if (!fs.existsSync(claudeDir)) return [];
 
-      // Smart path decoding function (same as in getClaudeProjects)
-      const decodeClaudePath = (encoded: string): string => {
-        const parts = encoded.split('-').filter(Boolean);
-
-        const tryDecode = (index: number, currentPath: string): string | null => {
-          if (index >= parts.length) {
-            return fs.existsSync(currentPath) ? currentPath : null;
-          }
-
-          const withSlash = currentPath + '/' + parts[index];
-          if (fs.existsSync(withSlash)) {
-            const result = tryDecode(index + 1, withSlash);
-            if (result) return result;
-          }
-
-          for (let end = index + 1; end <= parts.length; end++) {
-            const combined = parts.slice(index, end).join('-');
-            const withCombined = currentPath + '/' + combined;
-
-            if (fs.existsSync(withCombined)) {
-              if (end === parts.length) {
-                return withCombined;
-              }
-              const result = tryDecode(end, withCombined);
-              if (result) return result;
-            }
-          }
-
-          return null;
-        };
-
-        const result = tryDecode(0, '');
-        if (result) return result;
-
-        // Fallback to simple decode if nothing found
-        let decoded = '/' + parts.join('/');
-        return decoded;
-      };
-
       const dirs = fs.readdirSync(claudeDir);
       const projects: Array<{ id: string; path: string; name: string }> = [];
 
@@ -1254,7 +1532,7 @@ function registerFileSystemHandlers(deps: IpcHandlerDependencies): void {
         const stat = fs.statSync(fullPath);
         if (!stat.isDirectory()) continue;
 
-        const decodedPath = decodeClaudePath(dir);
+        const decodedPath = decodeProjectPath(dir);
         projects.push({
           id: dir,
           path: decodedPath,
@@ -1291,6 +1569,199 @@ function registerFileSystemHandlers(deps: IpcHandlerDependencies): void {
   });
 }
 
+// ============== Tasmania IPC Handlers ==============
+
+function registerTasmaniaHandlers(deps: IpcHandlerDependencies): void {
+  const { getAppSettings } = deps;
+
+  // Import shared Tasmania client
+  const { tasmaniaFetch } = require('../services/tasmania-client') as typeof import('../services/tasmania-client');
+
+  // Test: check MCP server exists + Control API reachable
+  ipcMain.handle('tasmania:test', async () => {
+    const appSettings = getAppSettings();
+    const serverPath = appSettings.tasmaniaServerPath;
+    const serverExists = serverPath ? fs.existsSync(serverPath) : false;
+
+    let apiReachable = false;
+    try {
+      const res = await tasmaniaFetch('/api/status');
+      apiReachable = res.ok;
+    } catch {
+      // API not reachable
+    }
+
+    return {
+      success: serverExists && apiReachable,
+      serverExists,
+      apiReachable,
+    };
+  });
+
+  // Get live server status from Control API
+  ipcMain.handle('tasmania:getStatus', async () => {
+    try {
+      const res = await tasmaniaFetch('/api/status');
+      if (!res.ok) {
+        return { status: 'stopped' as const, backend: null, port: null, modelName: null, modelPath: null, endpoint: null, startedAt: null, error: `HTTP ${res.status}` };
+      }
+      const data = await res.json();
+      return {
+        status: data.status || 'stopped',
+        backend: data.backend || null,
+        port: data.port || null,
+        modelName: data.modelName || null,
+        modelPath: data.modelPath || null,
+        endpoint: data.endpoint || null,
+        startedAt: data.startedAt || null,
+      };
+    } catch {
+      return { status: 'stopped' as const, backend: null, port: null, modelName: null, modelPath: null, endpoint: null, startedAt: null };
+    }
+  });
+
+  // List available local models from Control API
+  ipcMain.handle('tasmania:getModels', async () => {
+    try {
+      const res = await tasmaniaFetch('/api/models');
+      if (!res.ok) {
+        return { models: [], error: `HTTP ${res.status}` };
+      }
+      const models = await res.json();
+      return { models: Array.isArray(models) ? models : [] };
+    } catch (err) {
+      return { models: [], error: String(err) };
+    }
+  });
+
+  // Start a model via Control API
+  ipcMain.handle('tasmania:loadModel', async (_event, modelPath: string) => {
+    try {
+      const res = await tasmaniaFetch('/api/start', {
+        method: 'POST',
+        body: JSON.stringify({ modelPath }),
+      });
+      if (!res.ok) {
+        const text = await res.text();
+        return { success: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // Stop running model via Control API
+  ipcMain.handle('tasmania:stopModel', async () => {
+    try {
+      const res = await tasmaniaFetch('/api/stop', { method: 'POST' });
+      if (!res.ok) {
+        const text = await res.text();
+        return { success: false, error: `HTTP ${res.status}: ${text.slice(0, 200)}` };
+      }
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // Check if Tasmania MCP is registered across all providers
+  ipcMain.handle('tasmania:getMcpStatus', async () => {
+    try {
+      const { getAllProviders } = await import('../providers');
+      const providers = getAllProviders();
+      const appSettings = getAppSettings();
+      const expectedPath = appSettings.tasmaniaServerPath || '';
+
+      // Check all providers — configured if registered in at least one
+      let configured = false;
+      for (const provider of providers) {
+        try {
+          if (provider.isMcpServerRegistered('tasmania', expectedPath)) {
+            configured = true;
+            break;
+          }
+        } catch {
+          // Skip provider on error
+        }
+      }
+
+      // Fallback: also check via claude mcp list if not found
+      if (!configured) {
+        try {
+          const { exec } = await import('child_process');
+          await new Promise<void>((resolve) => {
+            exec('claude mcp list', { timeout: 3000 }, (_err, stdout) => {
+              if (stdout) configured = stdout.includes('tasmania');
+              resolve();
+            });
+          });
+        } catch {
+          // claude CLI not available
+        }
+      }
+
+      return { configured };
+    } catch (err) {
+      return { configured: false, error: String(err) };
+    }
+  });
+
+  // Register Tasmania MCP with all providers
+  ipcMain.handle('tasmania:setup', async () => {
+    try {
+      const appSettings = getAppSettings();
+      const serverPath = appSettings.tasmaniaServerPath;
+
+      if (!serverPath) {
+        return { success: false, error: 'MCP server path not configured. Set the path above first.' };
+      }
+
+      if (!fs.existsSync(serverPath)) {
+        return { success: false, error: `MCP server not found at ${serverPath}` };
+      }
+
+      const command = serverPath.endsWith('.ts') ? 'npx' : 'node';
+      const args = serverPath.endsWith('.ts') ? ['tsx', serverPath] : [serverPath];
+
+      const { getAllProviders } = await import('../providers');
+      const providers = getAllProviders();
+
+      for (const provider of providers) {
+        try {
+          await provider.registerMcpServer('tasmania', command, args);
+        } catch (err) {
+          console.error(`[${provider.id}] Failed to register Tasmania:`, err);
+        }
+      }
+
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+
+  // Remove Tasmania MCP from all providers
+  ipcMain.handle('tasmania:remove', async () => {
+    try {
+      const { getAllProviders } = await import('../providers');
+      const providers = getAllProviders();
+
+      for (const provider of providers) {
+        try {
+          await provider.removeMcpServer('tasmania');
+        } catch (err) {
+          console.error(`[${provider.id}] Failed to remove Tasmania:`, err);
+        }
+      }
+
+      return { success: true };
+    } catch (err) {
+      return { success: false, error: String(err) };
+    }
+  });
+}
+
 // ============== Shell IPC Handlers ==============
 
 function registerShellHandlers(deps: IpcHandlerDependencies): void {
@@ -1299,9 +1770,10 @@ function registerShellHandlers(deps: IpcHandlerDependencies): void {
   // Open in external terminal
   ipcMain.handle('shell:open-terminal', async (_event, { cwd, command }: { cwd: string; command?: string }) => {
     const shell = process.env.SHELL || '/bin/zsh';
+    const escapedCwd = cwd.replace(/'/g, "'\\''");
     const script = command
-      ? `tell application "Terminal" to do script "cd '${cwd}' && ${command}"`
-      : `tell application "Terminal" to do script "cd '${cwd}'"`;
+      ? `tell application "Terminal" to do script "cd '${escapedCwd}' && ${command}"`
+      : `tell application "Terminal" to do script "cd '${escapedCwd}'"`;
 
     const ptyProcess = pty.spawn(shell, ['-c', `osascript -e '${script.replace(/'/g, "'\\''")}'`], {
       name: 'xterm-256color',

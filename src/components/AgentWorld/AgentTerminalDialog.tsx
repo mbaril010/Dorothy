@@ -55,6 +55,18 @@ const CodePanel = dynamic(() => import('./CodePanel'), {
 // Store PTY IDs per agent to persist terminals across dialog open/close
 const persistentTerminals = new Map<string, { ptyId: string; outputBuffer: string[] }>();
 
+// Strip Ink/ANSI cursor movement sequences that break during output replay.
+function stripCursorSequences(data: string): string {
+  return data
+    .replace(/\x1b\[\d*[ABCDEFGH]/g, '')
+    .replace(/\x1b\[\d*;\d*[Hf]/g, '')
+    .replace(/\x1b\[\d*K/g, '')
+    .replace(/\x1b\[\d*J/g, '')
+    .replace(/\x1b\[?[su78]/g, '')
+    .replace(/\x1b\[\?25[lh]/g, '')
+    .replace(/\x1b\[\?1049[hl]/g, '');
+}
+
 // Helper to detect Super Agent
 const isSuperAgent = (agent: { name?: string } | null) => {
   if (!agent) return false;
@@ -720,7 +732,7 @@ export default function AgentTerminalDialog({
         cursorBlink: true,
         cursorStyle: 'bar',
         scrollback: 10000,
-        convertEol: true,
+        convertEol: agent?.provider !== 'gemini',
       });
 
       const fitAddon = new FitAddon();
@@ -754,11 +766,21 @@ export default function AgentTerminalDialog({
           term.focus();
         }, 350);
 
+        // Filter out xterm focus in/out reports (\x1b[I / \x1b[O) that Claude Code
+        // requests via DECSET 1004 — these should not be forwarded as user input.
         term.onData(async (data) => {
+          // Drop entire event if it's purely DA response fragments
+          if (/^(\x1b\[\?[\d;]*c|\d+;\d+c)+$/.test(data)) return;
+          const cleaned = data
+            .replace(/\x1b\[\?[\d;]*c/g, '')
+            .replace(/\x1b\[\d+;\d+R/g, '')
+            .replace(/\x1b\[(?:I|O)/g, '')
+            .replace(/\d+;\d+c/g, '');
+          if (!cleaned) return;
           const id = agentIdRef.current;
           if (id && window.electronAPI?.agent?.sendInput) {
             try {
-              await window.electronAPI.agent.sendInput({ id, input: data });
+              await window.electronAPI.agent.sendInput({ id, input: cleaned });
             } catch (err) {
               console.error('Error sending input:', err);
             }
@@ -774,16 +796,20 @@ export default function AgentTerminalDialog({
           try {
             const latestAgent = await window.electronAPI.agent.get(agent.id);
             if (latestAgent?.output && latestAgent.output.length > 0) {
+              const isGeminiAgent = agent.provider === 'gemini';
+              const writeLine = (line: string) =>
+                term.write(isGeminiAgent ? stripCursorSequences(line) : line);
+
               if (skipHistoricalOutput) {
                 // Just show the last few chunks for context (recent output)
                 const recentOutput = latestAgent.output.slice(-20);
                 if (recentOutput.length > 0) {
-                  recentOutput.forEach((line: string) => term.write(line));
+                  recentOutput.forEach(writeLine);
                 }
               } else {
                 // Show all historical output
                 term.writeln(`\x1b[33m--- Previous output ---\x1b[0m`);
-                latestAgent.output.forEach((line: string) => term.write(line));
+                latestAgent.output.forEach(writeLine);
               }
               setTimeout(fitAndResize, 50);
             }
@@ -948,8 +974,16 @@ export default function AgentTerminalDialog({
         }
 
         term.onData(async (data) => {
+          // Drop entire event if it's purely DA response fragments
+          if (/^(\x1b\[\?[\d;]*c|\d+;\d+c)+$/.test(data)) return;
+          const cleaned = data
+            .replace(/\x1b\[\?[\d;]*c/g, '')
+            .replace(/\x1b\[\d+;\d+R/g, '')
+            .replace(/\x1b\[(?:I|O)/g, '')
+            .replace(/\d+;\d+c/g, '');
+          if (!cleaned) return;
           if (quickPtyIdRef.current && window.electronAPI?.pty?.write) {
-            await window.electronAPI.pty.write({ id: quickPtyIdRef.current, data });
+            await window.electronAPI.pty.write({ id: quickPtyIdRef.current, data: cleaned });
           }
         });
 

@@ -10,7 +10,7 @@
  * - Scheduler for automated tasks
  */
 
-import { app, BrowserWindow, Notification, shell } from 'electron';
+import { app, BrowserWindow } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
@@ -19,7 +19,7 @@ import * as os from 'os';
 import type { AppSettings, AgentStatus } from './types';
 
 // Constants
-import { DATA_DIR, APP_SETTINGS_FILE } from './constants';
+import { APP_SETTINGS_FILE } from './constants';
 
 // Core modules
 import {
@@ -27,7 +27,6 @@ import {
   registerProtocolSchemes,
   setupProtocolHandler,
   getMainWindow,
-  setMainWindow,
 } from './core/window-manager';
 
 import {
@@ -36,7 +35,6 @@ import {
   saveAgents,
   initAgentPty,
   handleStatusChangeNotification,
-  setSuperAgentTelegramTask,
   getSuperAgentOutputBuffer,
   clearSuperAgentOutputBuffer,
 } from './core/agent-manager';
@@ -46,8 +44,8 @@ import {
   quickPtyProcesses,
   skillPtyProcesses,
   pluginPtyProcesses,
-  createQuickPty,
   killAllPty,
+  writeProgrammaticInput,
 } from './core/pty-manager';
 
 // Services
@@ -84,11 +82,12 @@ import {
 import { registerIpcHandlers, IpcHandlerDependencies } from './handlers/ipc-handlers';
 import { registerSchedulerHandlers } from './handlers/scheduler-handlers';
 import { registerAutomationHandlers } from './handlers/automation-handlers';
-import { registerCLIPathsHandlers, getCLIPathsConfig } from './handlers/cli-paths-handlers';
-import { registerKanbanHandlers, KanbanHandlerDependencies } from './handlers/kanban-handlers';
+import { registerCLIPathsHandlers } from './handlers/cli-paths-handlers';
+import { registerKanbanHandlers } from './handlers/kanban-handlers';
 import { registerVaultHandlers } from './handlers/vault-handlers';
+import { registerWorldHandlers } from './handlers/world-handlers';
 import { initVaultDb, closeVaultDb } from './services/vault-db';
-import { checkForUpdates } from './services/update-checker';
+import { initAutoUpdater, checkForUpdates, setMainWindowGetter } from './services/update-checker';
 import { initKanbanAutomation, findMatchingAgent, createAgentForTask, startAgentForTask } from './services/kanban-automation';
 
 // Utils
@@ -98,6 +97,7 @@ import {
   isSuperAgent,
   getSuperAgent,
   ensureDataDir,
+  ensureDorothyClaudeMd,
   migrateFromClaudeManager,
 } from './utils';
 
@@ -128,10 +128,24 @@ function loadAppSettings(): AppSettings {
     jiraApiToken: '',
     socialDataEnabled: false,
     socialDataApiKey: '',
+    xPostingEnabled: false,
+    xApiKey: '',
+    xApiSecret: '',
+    xAccessToken: '',
+    xAccessTokenSecret: '',
+    tasmaniaEnabled: false,
+    tasmaniaServerPath: '',
+    gwsEnabled: false,
+    gwsSkillsInstalled: false,
     verboseModeEnabled: false,
     autoCheckUpdates: true,
+    defaultProvider: 'claude',
     cliPaths: {
       claude: '',
+      codex: '',
+      gemini: '',
+      gws: '',
+      gcloud: '',
       gh: '',
       node: '',
       additionalPaths: [],
@@ -282,6 +296,9 @@ app.whenReady().then(async () => {
   // Ensure data directory exists
   ensureDataDir();
 
+  // Write Dorothy's CLAUDE.md to ~/.dorothy/ so all spawned agents can load it
+  ensureDorothyClaudeMd();
+
   // Migrate data from ~/.claude-manager if it exists (rebrand migration)
   migrateFromClaudeManager();
 
@@ -300,7 +317,10 @@ app.whenReady().then(async () => {
   // Register all IPC handlers
   const deps = createIpcDependencies();
   registerIpcHandlers(deps);
-  registerSchedulerHandlers();
+  registerSchedulerHandlers({
+    agents,
+    getAppSettings: () => appSettings,
+  });
   registerAutomationHandlers();
   registerMcpOrchestratorHandlers();
   registerCLIPathsHandlers({
@@ -309,11 +329,64 @@ app.whenReady().then(async () => {
     saveAppSettings: saveAppSettingsToFile,
   });
 
+  // Register kanban handlers
+  registerKanbanHandlers({
+    getMainWindow,
+    findMatchingAgent,
+    createAgentForTask,
+    startAgent: startAgentForTask,
+    stopAgent: async (agentId: string) => {
+      const agent = agents.get(agentId);
+      if (agent?.ptyId) {
+        const ptyProcess = ptyProcesses.get(agent.ptyId);
+        if (ptyProcess) {
+          // Send Ctrl+C to interrupt
+          ptyProcess.write('\x03');
+        }
+        agent.status = 'idle';
+        agent.currentTask = undefined;
+        agent.lastActivity = new Date().toISOString();
+        saveAgents();
+
+        getMainWindow()?.webContents.send('agent:status', {
+          type: 'status',
+          agentId,
+          status: 'idle',
+          timestamp: new Date().toISOString(),
+        });
+      }
+    },
+    deleteAgent: async (agentId: string) => {
+      const agent = agents.get(agentId);
+      if (agent) {
+        // Stop PTY if running
+        if (agent.ptyId) {
+          const ptyProcess = ptyProcesses.get(agent.ptyId);
+          if (ptyProcess) {
+            ptyProcess.kill();
+          }
+          ptyProcesses.delete(agent.ptyId);
+        }
+        // Remove agent
+        agents.delete(agentId);
+        saveAgents();
+        console.log(`Agent ${agentId} deleted`);
+      }
+    },
+    getAgentOutput: (agentId: string) => {
+      const agent = agents.get(agentId);
+      return agent?.output || [];
+    },
+  });
+
   // Initialize vault database
   initVaultDb();
 
   // Register vault handlers
   registerVaultHandlers({ getMainWindow });
+
+  // Register world (generative zone) handlers
+  registerWorldHandlers({ getMainWindow });
 
   // Initialize kanban automation service
   initKanbanAutomation({
@@ -331,6 +404,9 @@ app.whenReady().then(async () => {
         cwd = os.homedir();
       }
 
+      // Always include world-builder skill
+      const allSkills = [...new Set([...config.skills, 'world-builder'])];
+
       const ptyProcess = pty.spawn(shell, ['-l'], {
         name: 'xterm-256color',
         cols: 120,
@@ -338,7 +414,7 @@ app.whenReady().then(async () => {
         cwd,
         env: {
           ...process.env as { [key: string]: string },
-          CLAUDE_SKILLS: config.skills.join(','),
+          CLAUDE_SKILLS: allSkills.join(','),
           CLAUDE_AGENT_ID: id,
           CLAUDE_PROJECT_PATH: config.projectPath,
         },
@@ -351,7 +427,7 @@ app.whenReady().then(async () => {
         id,
         status: 'idle',
         projectPath: config.projectPath,
-        skills: config.skills,
+        skills: allSkills,
         output: [],
         lastActivity: new Date().toISOString(),
         ptyId,
@@ -452,65 +528,14 @@ app.whenReady().then(async () => {
       if (fullCommand.length > 100) {
         const tmpScript = path.join(os.tmpdir(), `claude-agent-${agentId}.sh`);
         fs.writeFileSync(tmpScript, `#!/bin/bash\n${fullCommand}\n`, { mode: 0o755 });
-        ptyProcess.write(`bash '${tmpScript}'\r`);
+        writeProgrammaticInput(ptyProcess, `bash '${tmpScript}'`);
       } else {
-        ptyProcess.write(fullCommand);
-        ptyProcess.write('\r');
+        writeProgrammaticInput(ptyProcess, fullCommand);
       }
 
       saveAgents();
     },
     saveAgents,
-  });
-
-  // Register kanban handlers
-  registerKanbanHandlers({
-    getMainWindow,
-    findMatchingAgent,
-    createAgentForTask,
-    startAgent: startAgentForTask,
-    stopAgent: async (agentId: string) => {
-      const agent = agents.get(agentId);
-      if (agent?.ptyId) {
-        const ptyProcess = ptyProcesses.get(agent.ptyId);
-        if (ptyProcess) {
-          // Send Ctrl+C to interrupt
-          ptyProcess.write('\x03');
-        }
-        agent.status = 'idle';
-        agent.currentTask = undefined;
-        agent.lastActivity = new Date().toISOString();
-        saveAgents();
-
-        getMainWindow()?.webContents.send('agent:status', {
-          type: 'status',
-          agentId,
-          status: 'idle',
-          timestamp: new Date().toISOString(),
-        });
-      }
-    },
-    deleteAgent: async (agentId: string) => {
-      const agent = agents.get(agentId);
-      if (agent) {
-        // Stop PTY if running
-        if (agent.ptyId) {
-          const ptyProcess = ptyProcesses.get(agent.ptyId);
-          if (ptyProcess) {
-            ptyProcess.kill();
-          }
-          ptyProcesses.delete(agent.ptyId);
-        }
-        // Remove agent
-        agents.delete(agentId);
-        saveAgents();
-        console.log(`Agent ${agentId} deleted`);
-      }
-    },
-    getAgentOutput: (agentId: string) => {
-      const agent = agents.get(agentId);
-      return agent?.output || [];
-    },
   });
 
   // Initialize services
@@ -522,37 +547,20 @@ app.whenReady().then(async () => {
   initApiServer();
 
   // Setup MCP orchestrator and hooks
-  await setupMcpOrchestrator();
+  await setupMcpOrchestrator(appSettings);
   await configureStatusHooks();
 
-  // Auto-check for updates on startup
-  if (appSettings.autoCheckUpdates !== false) {
-    setTimeout(async () => {
-      try {
-        const updateInfo = await checkForUpdates();
-        if (updateInfo?.hasUpdate) {
-          // Notify the renderer so the UI can show an in-app update banner
-          const mainWin = getMainWindow();
-          if (mainWin && !mainWin.isDestroyed()) {
-            mainWin.webContents.send('app:update-available', updateInfo);
-          }
+  // Initialize electron-updater (wires up IPC events for progress, downloaded, error)
+  initAutoUpdater(getMainWindow);
+  setMainWindowGetter(getMainWindow);
 
-          // Also show OS notification as a secondary signal
-          if (Notification.isSupported()) {
-            const notification = new Notification({
-              title: 'Update Available',
-              body: `Dorothy ${updateInfo.latestVersion} is available (you have ${updateInfo.currentVersion})`,
-            });
-            notification.on('click', () => {
-              shell.openExternal(updateInfo.releaseUrl);
-            });
-            notification.show();
-          }
-        }
-      } catch (err) {
+  // Auto-check for updates on startup (electron-updater sends 'app:update-available' automatically)
+  if (appSettings.autoCheckUpdates !== false) {
+    setTimeout(() => {
+      checkForUpdates().catch((err) => {
         console.error('Auto-update check failed:', err);
-      }
-    }, 5000); // Delay 5s to let the app finish loading
+      });
+    }, 5000);
   }
 
   console.log('App initialization complete');

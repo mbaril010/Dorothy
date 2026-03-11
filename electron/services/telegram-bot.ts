@@ -7,6 +7,8 @@ import * as pty from 'node-pty';
 import { AgentStatus, AppSettings } from '../types';
 import { TG_CHARACTER_FACES, TELEGRAM_DOWNLOADS_DIR } from '../constants';
 import { isSuperAgent, formatAgentStatus, getSuperAgentInstructions, getTelegramInstructions } from '../utils';
+import { getProvider } from '../providers';
+import { writeProgrammaticInput } from '../core/pty-manager';
 
 // ============== Telegram Bot State ==============
 let telegramBot: TelegramBot | null = null;
@@ -698,19 +700,22 @@ export function initTelegramBot() {
           return;
         }
 
-        // Build command
-        let command = 'claude';
+        // Build command using agent's provider
+        const cliProvider = getProvider(agent.provider);
+        const binaryName = cliProvider.binaryName;
+        let command = binaryName;
         if (agent.skipPermissions) command += ' --dangerously-skip-permissions';
         if (agent.secondaryProjectPath) {
-          command += ` --add-dir '${agent.secondaryProjectPath.replace(/'/g, "'\\''")}'`;
+          const addDirFlag = cliProvider.getAddDirFlag();
+          command += ` ${addDirFlag} '${agent.secondaryProjectPath.replace(/'/g, "'\\''")}'`;
         }
+        command += ` ${cliProvider.getAddDirFlag()} '${require('os').homedir()}/.dorothy'`;
         command += ` '${task.replace(/'/g, "'\\''")}'`;
 
         agent.status = 'running';
         agent.currentTask = task.slice(0, 100);
         agent.lastActivity = new Date().toISOString();
-        ptyProcess.write(`cd '${workingPath}' && ${command}`);
-        ptyProcess.write('\r');
+        writeProgrammaticInput(ptyProcess, `cd '${workingPath}' && ${command}`);
         saveAgents();
 
         const emoji = isSuperAgent(agent) ? '👑' : (TG_CHARACTER_FACES[agent.character || ''] || '🤖');
@@ -1179,9 +1184,7 @@ export async function sendToSuperAgent(chatId: string, message: string, attached
       // Include Telegram context in the message with the chat ID for proper routing
       const telegramMessage = `[FROM TELEGRAM chat_id=${chatId} - Use send_telegram MCP tool with chat_id="${chatId}" to respond!] ${sanitizedMessage}`;
 
-      // Write the message first, then send Enter separately
-      ptyProcess.write(telegramMessage);
-      ptyProcess.write('\r');
+      writeProgrammaticInput(ptyProcess, telegramMessage);
 
       telegramBot?.sendMessage(chatId, `👑 Super Agent is processing...`);
     } else if (superAgent.status === 'idle' || superAgent.status === 'completed' || superAgent.status === 'error') {
@@ -1227,8 +1230,7 @@ export async function sendToSuperAgent(chatId: string, message: string, attached
       superAgentOutputBuffer = [];
 
       // Start new Claude session
-      ptyProcess.write(`cd '${workingPath}' && ${command}`);
-      ptyProcess.write('\r');
+      writeProgrammaticInput(ptyProcess, `cd '${workingPath}' && ${command}`);
       saveAgents();
 
       telegramBot?.sendMessage(chatId, `👑 Super Agent is processing your request...`);

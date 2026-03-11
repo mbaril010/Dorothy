@@ -68,8 +68,10 @@ export const InstallTerminalModal = ({ show, command, onClose, onComplete }: Ins
 
       // Handle user input - send to PTY
       term.onData((data) => {
+        const cleaned = data.replace(/\x1b\[(?:I|O)/g, '');
+        if (!cleaned) return;
         if (ptyIdRef.current && window.electronAPI?.plugin?.installWrite) {
-          window.electronAPI.plugin.installWrite({ id: ptyIdRef.current, data });
+          window.electronAPI.plugin.installWrite({ id: ptyIdRef.current, data: cleaned });
         }
       });
 
@@ -111,7 +113,12 @@ export const InstallTerminalModal = ({ show, command, onClose, onComplete }: Ins
 
     const startPty = async () => {
       try {
-        const result = await window.electronAPI?.plugin?.installStart({ command });
+        const term = xtermRef.current;
+        const result = await window.electronAPI?.plugin?.installStart({
+          command,
+          cols: term?.cols,
+          rows: term?.rows,
+        });
         if (!result) return;
         ptyIdRef.current = result.id;
       } catch (err) {
@@ -215,7 +222,7 @@ export const InstallTerminalModal = ({ show, command, onClose, onComplete }: Ins
         {/* Terminal Content */}
         <div
           ref={terminalRef}
-          className="h-[400px] p-2"
+          className="h-[400px]"
           style={{ backgroundColor: '#0D0B08' }}
         />
 

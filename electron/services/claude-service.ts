@@ -1,6 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import { decodeProjectPath } from '../utils/decode-project-path';
 
 // Type definitions for Claude data structures
 export interface ClaudeSettings {
@@ -89,54 +90,6 @@ export async function getClaudeStats(): Promise<ClaudeStats | null> {
   }
 }
 
-/**
- * Smart path decoder for Claude project paths
- * Claude encodes paths by replacing / with -, but folder names can contain -,
- * so we need to find the actual path by trying all combinations
- */
-function decodeClaudePath(encoded: string): string {
-  const parts = encoded.split('-').filter(Boolean);
-
-  // Recursive function to try all combinations
-  const tryDecode = (index: number, currentPath: string): string | null => {
-    if (index >= parts.length) {
-      return fs.existsSync(currentPath) ? currentPath : null;
-    }
-
-    // Try adding with slash first (new directory)
-    const withSlash = currentPath + '/' + parts[index];
-    if (fs.existsSync(withSlash)) {
-      const result = tryDecode(index + 1, withSlash);
-      if (result) return result;
-    }
-
-    // Try combining remaining parts with dashes
-    // This handles cases like "frontend-lite" being split into ["frontend", "lite"]
-    for (let end = index + 1; end <= parts.length; end++) {
-      const combined = parts.slice(index, end).join('-');
-      const withCombined = currentPath + '/' + combined;
-
-      if (fs.existsSync(withCombined)) {
-        if (end === parts.length) {
-          return withCombined;
-        }
-        const result = tryDecode(end, withCombined);
-        if (result) return result;
-      }
-    }
-
-    return null;
-  };
-
-  // Start with empty path (will add leading /)
-  const result = tryDecode(0, '');
-
-  if (result) return result;
-
-  // Fallback to simple decode if nothing found
-  let decoded = '/' + parts.join('/');
-  return decoded;
-}
 
 /**
  * Read Claude Code projects from ~/.claude/projects
@@ -155,7 +108,7 @@ export async function getClaudeProjects(): Promise<ClaudeProject[]> {
       if (!stat.isDirectory()) continue;
 
       // Decode project path smartly
-      const decodedPath = decodeClaudePath(dir);
+      const decodedPath = decodeProjectPath(dir);
 
       // Get sessions
       const sessions: Array<{ id: string; timestamp: number }> = [];

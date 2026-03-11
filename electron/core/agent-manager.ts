@@ -9,6 +9,7 @@ import { AGENTS_FILE, DATA_DIR } from '../constants';
 import { ensureDataDir, isSuperAgent } from '../utils';
 import { ptyProcesses } from './pty-manager';
 import { buildFullPath } from '../utils/path-builder';
+import { getProvider } from '../providers';
 
 export const agents: Map<string, AgentStatus> = new Map();
 
@@ -237,22 +238,20 @@ export async function initAgentPty(
 
   // Build PATH that includes user-configured paths, nvm, and other common locations for claude
   const cliExtraPaths: string[] = [];
+  let savedSettings: Record<string, unknown> = {};
   try {
     const settingsFile = path.join(os.homedir(), '.dorothy', 'app-settings.json');
     if (fs.existsSync(settingsFile)) {
-      const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
-      if (settings.cliPaths) {
-        if (settings.cliPaths.claude) {
-          cliExtraPaths.push(path.dirname(settings.cliPaths.claude));
+      savedSettings = JSON.parse(fs.readFileSync(settingsFile, 'utf-8'));
+      const cliPaths = savedSettings.cliPaths as Record<string, unknown> | undefined;
+      if (cliPaths) {
+        for (const key of ['claude', 'codex', 'gemini', 'gws', 'gh', 'node']) {
+          if (cliPaths[key]) {
+            cliExtraPaths.push(path.dirname(cliPaths[key] as string));
+          }
         }
-        if (settings.cliPaths.gh) {
-          cliExtraPaths.push(path.dirname(settings.cliPaths.gh));
-        }
-        if (settings.cliPaths.node) {
-          cliExtraPaths.push(path.dirname(settings.cliPaths.node));
-        }
-        if (settings.cliPaths.additionalPaths) {
-          cliExtraPaths.push(...settings.cliPaths.additionalPaths.filter(Boolean));
+        if (cliPaths.additionalPaths) {
+          cliExtraPaths.push(...(cliPaths.additionalPaths as string[]).filter(Boolean));
         }
       }
     }
@@ -260,6 +259,33 @@ export async function initAgentPty(
     // Ignore settings load errors
   }
   const fullPath = buildFullPath(cliExtraPaths);
+
+  // For local provider, bake Tasmania env vars into the PTY process environment
+  let tasmaniaEnv: Record<string, string> = {};
+  if (agent.provider === 'local') {
+    try {
+      const { getTasmaniaStatus } = require('../services/tasmania-client') as typeof import('../services/tasmania-client');
+      const tasmaniaStatus = await getTasmaniaStatus();
+      if (tasmaniaStatus.status === 'running' && tasmaniaStatus.endpoint) {
+        const localModel = agent.localModel || tasmaniaStatus.modelName || 'default';
+        // Strip /v1 suffix — Claude Code SDK appends /v1/messages itself
+        const baseUrl = tasmaniaStatus.endpoint!.replace(/\/v1\/?$/, '');
+        tasmaniaEnv = {
+          ANTHROPIC_BASE_URL: baseUrl,
+          ANTHROPIC_MODEL: localModel,
+          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+        };
+      } else {
+        console.warn(`Agent ${agent.id} is local provider but Tasmania is not running — PTY created without Tasmania env vars`);
+      }
+    } catch (err) {
+      console.warn(`Failed to get Tasmania status for agent ${agent.id}:`, err);
+    }
+  }
+
+  // Get provider-specific env vars
+  const agentProvider = getProvider(agent.provider);
+  const providerEnvVars = agentProvider.getPtyEnvVars(agent.id, agent.projectPath, agent.skills);
 
   const ptyProcess = pty.spawn(shell, ['-l'], {
     name: 'xterm-256color',
@@ -269,9 +295,10 @@ export async function initAgentPty(
     env: {
       ...process.env as { [key: string]: string },
       PATH: fullPath,
-      CLAUDE_SKILLS: agent.skills.join(','),
-      CLAUDE_AGENT_ID: agent.id,
-      CLAUDE_PROJECT_PATH: agent.projectPath,
+      ...providerEnvVars,
+      // Load CLAUDE.md from --add-dir directories (e.g. ~/.dorothy)
+      CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1',
+      ...tasmaniaEnv,
     },
   });
 

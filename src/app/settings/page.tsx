@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense, useState, useEffect } from 'react';
+import { useSearchParams } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Save, Loader2, AlertCircle, Check, RefreshCw } from 'lucide-react';
 import { useSettings } from '@/hooks/useSettings';
@@ -8,23 +9,44 @@ import {
   SettingsSidebar,
   InstallTerminalModal,
   GeneralSection,
-  MemorySection,
+  TerminalSection,
+  ObsidianSection,
   GitSection,
   NotificationsSection,
   TelegramSection,
   SlackSection,
   JiraSection,
   SocialDataSection,
+  TasmaniaSection,
+  GoogleWorkspaceSection,
   PermissionsSection,
   SkillsSection,
   CLIPathsSection,
   SystemSection,
+  SECTIONS,
 } from '@/components/Settings';
 import type { SettingsSection } from '@/components/Settings';
 import 'xterm/css/xterm.css';
 
 export default function SettingsPage() {
+  return (
+    <Suspense>
+      <SettingsPageInner />
+    </Suspense>
+  );
+}
+
+function SettingsPageInner() {
+  const searchParams = useSearchParams();
+  const sectionParam = searchParams.get('section');
   const [activeSection, setActiveSection] = useState<SettingsSection>('general');
+
+  // Deep-link: initialize from URL param
+  useEffect(() => {
+    if (sectionParam && SECTIONS.some(s => s.id === sectionParam)) {
+      setActiveSection(sectionParam as SettingsSection);
+    }
+  }, [sectionParam]);
   const [showInstallTerminal, setShowInstallTerminal] = useState(false);
   const [installCommand, setInstallCommand] = useState('');
 
@@ -45,34 +67,14 @@ export default function SettingsPage() {
     updateLocalAppSettings,
   } = useSettings();
 
-  const handleInstallClaudeMem = () => {
-    setInstallCommand('/plugin marketplace add thedotmack/claude-mem && /plugin install claude-mem');
-    setShowInstallTerminal(true);
-  };
-
-  const handleToggleClaudeMem = () => {
-    if (!settings) return;
-    const isClaudeMemInstalled = settings.enabledPlugins?.['claude-mem@thedotmack'] === true;
-    const updatedPlugins = {
-      ...settings.enabledPlugins,
-      'claude-mem@thedotmack': !isClaudeMemInstalled,
-    };
-    updateSettings({ enabledPlugins: updatedPlugins });
-  };
-
   const renderContent = () => {
     switch (activeSection) {
       case 'general':
         return <GeneralSection info={info} appSettings={appSettings} onSaveAppSettings={handleSaveAppSettings} />;
-      case 'memory':
-        return (
-          <MemorySection
-            settings={settings}
-            hasChanges={hasChanges}
-            onToggleClaudeMem={handleToggleClaudeMem}
-            onInstallClaudeMem={handleInstallClaudeMem}
-          />
-        );
+      case 'terminal':
+        return <TerminalSection appSettings={appSettings} onSaveAppSettings={handleSaveAppSettings} />;
+      case 'obsidian':
+        return <ObsidianSection appSettings={appSettings} onSaveAppSettings={handleSaveAppSettings} />;
       case 'git':
         return <GitSection settings={settings} onUpdateSettings={updateSettings} />;
       case 'notifications':
@@ -109,6 +111,22 @@ export default function SettingsPage() {
       case 'socialdata':
         return (
           <SocialDataSection
+            appSettings={appSettings}
+            onSaveAppSettings={handleSaveAppSettings}
+            onUpdateLocalSettings={updateLocalAppSettings}
+          />
+        );
+      case 'tasmania':
+        return (
+          <TasmaniaSection
+            appSettings={appSettings}
+            onSaveAppSettings={handleSaveAppSettings}
+            onUpdateLocalSettings={updateLocalAppSettings}
+          />
+        );
+      case 'google-workspace':
+        return (
+          <GoogleWorkspaceSection
             appSettings={appSettings}
             onSaveAppSettings={handleSaveAppSettings}
             onUpdateLocalSettings={updateLocalAppSettings}

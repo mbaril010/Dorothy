@@ -55,12 +55,62 @@ export interface VaultAttachmentElectron {
   created_at: string;
 }
 
+export interface MemoryFile {
+  name: string;
+  path: string;
+  content: string;
+  size: number;
+  lastModified: string;
+  isEntrypoint: boolean;
+}
+
+export interface ProjectMemory {
+  id: string;
+  projectName: string;
+  projectPath: string;
+  memoryDir: string;
+  files: MemoryFile[];
+  totalSize: number;
+  lastModified: string;
+  hasMemory: boolean;
+  provider: string;    // 'claude' | 'codex' | 'gemini'
+}
+
+export interface ObsidianFile {
+  name: string;
+  path: string;
+  relativePath: string;
+  content: string;
+  size: number;
+  lastModified: string;
+  frontmatter?: Record<string, unknown>;
+}
+
+export interface ObsidianFolder {
+  name: string;
+  path: string;
+  relativePath: string;
+  children: (ObsidianFolder | { type: 'file'; name: string; relativePath: string })[];
+}
+
+export interface ImportPreview {
+  name: string;
+  description: string;
+  width: number;
+  height: number;
+  npcCount: number;
+  buildingCount: number;
+  screenshot: string;
+}
+
 export interface WorktreeConfig {
   enabled: boolean;
   branchName: string;
 }
 
 export type AgentCharacter = 'robot' | 'ninja' | 'wizard' | 'astronaut' | 'knight' | 'pirate' | 'alien' | 'viking' | 'frog';
+
+export type AgentProvider = 'claude' | 'codex' | 'gemini' | 'local';
 
 export interface AgentStatus {
   id: string;
@@ -79,6 +129,9 @@ export interface AgentStatus {
   name?: string;
   pathMissing?: boolean; // True if project path no longer exists
   skipPermissions?: boolean; // If true, use --dangerously-skip-permissions flag
+  provider?: AgentProvider;   // 'claude' (default) or 'local' (Tasmania)
+  localModel?: string;        // Tasmania model name when provider is 'local'
+  obsidianVaultPaths?: string[]; // Obsidian vault paths to mount via --add-dir (read-only)
 }
 
 export interface PtyDataEvent {
@@ -117,6 +170,9 @@ export interface ElectronAPI {
       name?: string;
       secondaryProjectPath?: string;
       skipPermissions?: boolean;
+      provider?: AgentProvider;
+      localModel?: string;
+      obsidianVaultPaths?: string[];
     }) => Promise<AgentStatus & { ptyId: string }>;
     update: (params: {
       id: string;
@@ -126,7 +182,7 @@ export interface ElectronAPI {
       name?: string;
       character?: AgentCharacter;
     }) => Promise<{ success: boolean; error?: string; agent?: AgentStatus }>;
-    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean } }) => Promise<{ success: boolean }>;
+    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean; provider?: AgentProvider; localModel?: string } }) => Promise<{ success: boolean }>;
     get: (id: string) => Promise<AgentStatus | null>;
     list: () => Promise<AgentStatus[]>;
     stop: (id: string) => Promise<{ success: boolean }>;
@@ -149,6 +205,9 @@ export interface ElectronAPI {
     installResize: (params: { id: string; cols: number; rows: number }) => Promise<{ success: boolean }>;
     installKill: (params: { id: string }) => Promise<{ success: boolean }>;
     listInstalled: () => Promise<string[]>;
+    listInstalledAll: () => Promise<Record<string, string[]>>;
+    linkToProvider: (params: { skillName: string; providerId: string }) => Promise<{ success: boolean; error?: string }>;
+    fetchMarketplace: () => Promise<{ skills: Array<{ rank: number; name: string; repo: string; installs: string; installsNum: number }> | null }>;
     onPtyData: (callback: (event: { id: string; data: string }) => void) => () => void;
     onPtyExit: (callback: (event: { id: string; exitCode: number }) => void) => () => void;
     onInstallOutput: (callback: (event: SkillInstallOutputEvent) => void) => () => void;
@@ -233,8 +292,17 @@ export interface ElectronAPI {
       jiraApiToken: string;
       socialDataEnabled: boolean;
       socialDataApiKey: string;
+      tasmaniaEnabled: boolean;
+      tasmaniaServerPath: string;
+      defaultProvider?: string;
+      terminalFontSize?: number;
+      terminalTheme?: 'dark' | 'light';
       cliPaths?: {
         claude: string;
+        codex: string;
+        gemini: string;
+        gws: string;
+        gcloud: string;
         gh: string;
         node: string;
         additionalPaths: string[];
@@ -262,8 +330,17 @@ export interface ElectronAPI {
       jiraApiToken?: string;
       socialDataEnabled?: boolean;
       socialDataApiKey?: string;
+      tasmaniaEnabled?: boolean;
+      tasmaniaServerPath?: string;
+      defaultProvider?: string;
+      terminalFontSize?: number;
+      terminalTheme?: 'dark' | 'light';
       cliPaths?: {
         claude: string;
+        codex: string;
+        gemini: string;
+        gws: string;
+        gcloud: string;
         gh: string;
         node: string;
         additionalPaths: string[];
@@ -294,6 +371,62 @@ export interface ElectronAPI {
   // SocialData (Twitter/X)
   socialData?: {
     test: () => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // X API (posting)
+  xApi?: {
+    test: () => Promise<{ success: boolean; username?: string; error?: string }>;
+  };
+
+  // Google Workspace (gws CLI)
+  gws?: {
+    detect: () => Promise<string>;
+    detectGcloud: () => Promise<string>;
+    authStatus: () => Promise<{
+      authenticated: boolean;
+      user: string | null;
+      tokenValid: boolean;
+      scopes: string[];
+      authMethod: string;
+      services: Record<string, 'none' | 'read' | 'write'>;
+    }>;
+    setup: () => Promise<{ success: boolean; error?: string }>;
+    remove: () => Promise<{ success: boolean; error?: string }>;
+    getMcpStatus: () => Promise<{ configured: boolean; error?: string }>;
+    listSkills: () => Promise<string[]>;
+  };
+
+  // Tasmania (Local LLM)
+  tasmania?: {
+    test: () => Promise<{ success: boolean; serverExists: boolean; apiReachable: boolean; error?: string }>;
+    getStatus: () => Promise<{
+      status: 'stopped' | 'starting' | 'running' | 'error';
+      backend: string | null;
+      port: number | null;
+      modelName: string | null;
+      modelPath: string | null;
+      endpoint: string | null;
+      startedAt: number | null;
+      error?: string;
+    }>;
+    getModels: () => Promise<{
+      models: Array<{
+        name: string;
+        filename: string;
+        path: string;
+        sizeBytes: number;
+        repo: string | null;
+        quantization: string | null;
+        parameters: string | null;
+        architecture: string | null;
+      }>;
+      error?: string;
+    }>;
+    loadModel: (modelPath: string) => Promise<{ success: boolean; error?: string }>;
+    stopModel: () => Promise<{ success: boolean; error?: string }>;
+    getMcpStatus: () => Promise<{ configured: boolean; error?: string }>;
+    setup: () => Promise<{ success: boolean; error?: string }>;
+    remove: () => Promise<{ success: boolean; error?: string }>;
   };
 
   // Dialogs
@@ -358,11 +491,12 @@ export interface ElectronAPI {
         };
         createdAt: string;
         lastRun?: string;
-        lastRunStatus?: 'success' | 'error';
+        lastRunStatus?: 'success' | 'error' | 'running' | 'partial';
         nextRun?: string;
       }>;
     }>;
     createTask: (params: {
+      title?: string;
       agentId?: string;
       prompt: string;
       schedule: string;
@@ -375,9 +509,25 @@ export interface ElectronAPI {
       };
     }) => Promise<{ success: boolean; error?: string; taskId?: string }>;
     deleteTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+    updateTask: (taskId: string, updates: {
+      title?: string;
+      prompt?: string;
+      schedule?: string;
+      projectPath?: string;
+      autonomous?: boolean;
+      notifications?: { telegram: boolean; slack: boolean };
+    }) => Promise<{ success: boolean; error?: string }>;
     runTask: (taskId: string) => Promise<{ success: boolean; error?: string }>;
-    getLogs: (taskId: string) => Promise<{ logs: string; error?: string }>;
+    getLogs: (taskId: string) => Promise<{
+      logs: string;
+      runs?: Array<{ startedAt: string; completedAt?: string; content: string }>;
+      error?: string;
+    }>;
     fixMcpPaths: () => Promise<{ success: boolean; error?: string }>;
+    watchLogs: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+    unwatchLogs: (taskId: string) => Promise<{ success: boolean; error?: string }>;
+    onLogData: (callback: (event: { taskId: string; data: string }) => void) => () => void;
+    onTaskStatus: (callback: (event: { taskId: string; status: string; summary?: string }) => void) => () => void;
   };
 
   // Automations
@@ -436,17 +586,29 @@ export interface ElectronAPI {
   cliPaths?: {
     detect: () => Promise<{
       claude: string;
+      codex: string;
+      gemini: string;
+      gws: string;
+      gcloud: string;
       gh: string;
       node: string;
     }>;
     get: () => Promise<{
       claude: string;
+      codex: string;
+      gemini: string;
+      gws: string;
+      gcloud: string;
       gh: string;
       node: string;
       additionalPaths: string[];
     }>;
     save: (paths: {
       claude: string;
+      codex: string;
+      gemini: string;
+      gws: string;
+      gcloud: string;
       gh: string;
       node: string;
       additionalPaths: string[];
@@ -543,25 +705,76 @@ export interface ElectronAPI {
     onTaskDeleted: (callback: (event: { id: string }) => void) => () => void;
   };
 
+  // World (generative zones)
+  world?: {
+    listZones: () => Promise<{ zones: unknown[]; error?: string }>;
+    getZone: (zoneId: string) => Promise<{ zone: unknown | null; error?: string }>;
+    exportZone: (params: { zoneId: string; screenshot: string }) => Promise<{ success: boolean; filePath?: string; error?: string }>;
+    importZone: () => Promise<{ success: boolean; preview?: ImportPreview; zone?: unknown; error?: string }>;
+    confirmImport: (zone: unknown) => Promise<{ success: boolean; zoneId?: string; error?: string }>;
+    deleteZone: (zoneId: string) => Promise<{ success: boolean; error?: string }>;
+    onZoneUpdated: (callback: (zone: unknown) => void) => () => void;
+    onZoneDeleted: (callback: (event: { id: string }) => void) => () => void;
+  };
+
   // Updates
   updates?: {
-    check: () => Promise<{
-      currentVersion: string;
-      latestVersion: string;
-      downloadUrl: string;
-      releaseUrl: string;
-      releaseNotes: string;
-      hasUpdate: boolean;
-    } | null>;
+    check: () => Promise<{ devMode?: boolean; error?: boolean; fallback?: boolean; currentVersion?: string } | null>;
+    download: () => Promise<unknown>;
+    quitAndInstall: () => Promise<void>;
     openExternal: (url: string) => Promise<{ success: boolean }>;
     onUpdateAvailable: (callback: (info: {
       currentVersion: string;
       latestVersion: string;
-      downloadUrl: string;
-      releaseUrl: string;
       releaseNotes: string;
       hasUpdate: boolean;
+      downloadUrl?: string;
+      releaseUrl?: string;
     }) => void) => () => void;
+    onUpdateNotAvailable: (callback: (info: {
+      currentVersion: string;
+      latestVersion: string;
+    }) => void) => () => void;
+    onDownloadProgress: (callback: (progress: {
+      percent: number;
+      bytesPerSecond: number;
+      transferred: number;
+      total: number;
+    }) => void) => () => void;
+    onUpdateDownloaded: (callback: () => void) => () => void;
+    onUpdateError: (callback: (error: string) => void) => () => void;
+  };
+
+  // Obsidian vault browsing & editing
+  obsidian?: {
+    scan: () => Promise<{
+      vaults: Array<{
+        vaultPath: string;
+        name: string;
+        files: (Omit<ObsidianFile, 'content'> & { preview?: string })[];
+        tree: ObsidianFolder;
+      }>;
+    }>;
+    readFile: (filePath: string, vaultPath: string) => Promise<{ file?: ObsidianFile; error?: string }>;
+    writeFile: (filePath: string, content: string, vaultPath: string) => Promise<{ success?: boolean; error?: string }>;
+    getVaultInfo: () => Promise<{ configured: boolean; vaultPaths: string[] }>;
+    detectVault: (projectPath: string) => Promise<{ detected: boolean; vaultPath: string | null }>;
+    addVault: (vaultPath: string) => Promise<{ success: boolean; error?: string }>;
+    removeVault: (vaultPath: string) => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // Native Claude memory (reads ~/.claude/projects/*/memory/)
+  memory?: {
+    listProjects: () => Promise<{ projects: ProjectMemory[]; error: string | null }>;
+    readFile: (filePath: string) => Promise<{ content: string; error?: string }>;
+    writeFile: (filePath: string, content: string) => Promise<{ success: boolean; error?: string }>;
+    createFile: (memoryDir: string, fileName: string, content?: string) => Promise<{ success: boolean; file?: MemoryFile; error?: string }>;
+    deleteFile: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+  };
+
+  // API
+  api?: {
+    getToken: () => Promise<string>;
   };
 
   // Get home path helper

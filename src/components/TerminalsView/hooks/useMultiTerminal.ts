@@ -5,7 +5,8 @@ import type { Terminal } from 'xterm';
 import type { FitAddon } from 'xterm-addon-fit';
 import type { AgentStatus } from '@/types/electron';
 import { isElectron } from '@/hooks/useElectron';
-import { TERMINAL_THEME, TERMINAL_CONFIG } from '../constants';
+import { TERMINAL_CONFIG } from '../constants';
+import { getTerminalTheme } from '@/components/AgentWorld/constants';
 
 interface TerminalEntry {
   terminal: Terminal;
@@ -19,6 +20,10 @@ interface TerminalEntry {
 
 interface UseMultiTerminalOptions {
   agents: AgentStatus[];
+  initialFontSize?: number;
+  onFontSizeChange?: (size: number) => void;
+  theme?: 'dark' | 'light';
+  onTerminalReady?: (agentId: string) => void;
 }
 
 const MIN_FONT_SIZE = 8;
@@ -42,12 +47,15 @@ function safeFit(agentId: string, entry: TerminalEntry) {
   } catch {}
 }
 
-export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
+export function useMultiTerminal({ agents, initialFontSize, onFontSizeChange, theme = 'dark', onTerminalReady }: UseMultiTerminalOptions) {
   const terminalsRef = useRef<Map<string, TerminalEntry>>(new Map());
   const xtermModuleRef = useRef<{ Terminal: typeof Terminal; FitAddon: typeof FitAddon } | null>(null);
   const initializingRef = useRef<Set<string>>(new Set());
-  const [fontSize, setFontSize] = useState(DEFAULT_FONT_SIZE);
+  const [fontSize, setFontSize] = useState(initialFontSize ?? DEFAULT_FONT_SIZE);
   const fitTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  const prevInitialFontSizeRef = useRef(initialFontSize);
+  const onTerminalReadyRef = useRef(onTerminalReady);
+  onTerminalReadyRef.current = onTerminalReady;
 
   // Load xterm modules once
   const loadModules = useCallback(async () => {
@@ -73,7 +81,9 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
     }, delay));
   }, []);
 
-  // Create and attach a terminal to a container
+  // Create and attach a terminal to a container.
+  // Uses a ResizeObserver to wait for the container to have real dimensions
+  // instead of giving up after a single retry.
   const initTerminal = useCallback(async (agentId: string, container: HTMLDivElement) => {
     if (initializingRef.current.has(agentId)) return;
     initializingRef.current.add(agentId);
@@ -86,16 +96,39 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
 
       const rect = container.getBoundingClientRect();
       if (rect.width < 10 || rect.height < 10) {
-        // Container too small — retry after a delay
-        await new Promise(resolve => setTimeout(resolve, 300));
-        const retry = container.getBoundingClientRect();
-        if (retry.width < 10 || retry.height < 10) {
+        // Container too small — wait for it to get real dimensions via ResizeObserver
+        const ready = await new Promise<boolean>(resolve => {
+          let resolved = false;
+          const observer = new ResizeObserver((entries) => {
+            if (resolved) return;
+            for (const entry of entries) {
+              const { width, height } = entry.contentRect;
+              if (width >= 10 && height >= 10) {
+                resolved = true;
+                observer.disconnect();
+                resolve(true);
+                return;
+              }
+            }
+          });
+          observer.observe(container);
+          // Safety timeout — don't wait forever
+          setTimeout(() => {
+            if (!resolved) {
+              resolved = true;
+              observer.disconnect();
+              resolve(false);
+            }
+          }, 3000);
+        });
+
+        if (!ready || !container.isConnected) {
           initializingRef.current.delete(agentId);
           return;
         }
       }
 
-      // Skip if already initialized
+      // Skip if already initialized (another path may have created it)
       const existing = terminalsRef.current.get(agentId);
       if (existing && !existing.disposed) {
         initializingRef.current.delete(agentId);
@@ -103,7 +136,7 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
       }
 
       const term = new modules.Terminal({
-        theme: TERMINAL_THEME,
+        theme: getTerminalTheme(theme),
         fontSize,
         fontFamily: TERMINAL_CONFIG.fontFamily,
         cursorBlink: TERMINAL_CONFIG.cursorBlink,
@@ -132,24 +165,24 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
       // Step 1: Initial fit — determines correct cols/rows for this panel size
       safeFit(agentId, entry);
 
-      // Step 2: Replay historical output, then clear screen.
-      // Historical output was formatted for the old PTY dimensions,
-      // so it will be garbled. We write it (so xterm has it in scrollback)
-      // then clear the visible area. For running agents, the PTY will
-      // redraw its UI after receiving the resize signal.
-      const agent = agents.find(a => a.id === agentId);
-      if (agent?.output?.length) {
-        const outputStr = agent.output.join('');
-        term.write(outputStr);
-      }
+      // Step 2: Replay historical output from Electron main process.
+      // Fetch directly via IPC to avoid depending on React state (agents array).
+      if (isElectron() && window.electronAPI?.agent?.get) {
+        try {
+          const agent = await window.electronAPI.agent.get(agentId);
+          if (agent?.output?.length) {
+            const outputStr = agent.output.join('');
+            term.write(outputStr);
+          }
 
-      // Step 3: For running/waiting agents, the PTY resize from safeFit
-      // will trigger Claude Code to redraw at correct dimensions.
-      // For idle agents, just clear the garbled display.
-      if (agent?.status === 'idle' || agent?.status === 'completed' || agent?.status === 'error') {
-        // Clear visible area but keep scrollback so user can scroll up
-        term.write('\x1b[2J\x1b[H');
-        term.write(`\x1b[90m— Session ${agent.status} —\x1b[0m\r\n`);
+          // Step 3: For running/waiting agents, the PTY resize from safeFit
+          // will trigger Claude Code to redraw at correct dimensions.
+          // For idle agents, just clear the garbled display.
+          if (agent?.status === 'idle' || agent?.status === 'completed' || agent?.status === 'error') {
+            term.write('\x1b[2J\x1b[H');
+            term.write(`\x1b[90m— Session ${agent.status} —\x1b[0m\r\n`);
+          }
+        } catch {}
       }
 
       // Step 4: Fit again after content is written (may affect scrollbar)
@@ -157,9 +190,13 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
       setTimeout(() => safeFit(agentId, entry), 200);
 
       // Forward keyboard input from xterm to PTY
+      // Filter out xterm focus in/out reports (\x1b[I / \x1b[O) that Claude Code
+      // requests via DECSET 1004 — these should not be forwarded as user input.
       term.onData((data) => {
+        const cleaned = data.replace(/\x1b\[(?:I|O)/g, '');
+        if (!cleaned) return;
         if (isElectron()) {
-          window.electronAPI!.agent.sendInput({ id: agentId, input: data }).catch(() => {});
+          window.electronAPI!.agent.sendInput({ id: agentId, input: cleaned }).catch(() => {});
         }
       });
 
@@ -172,10 +209,13 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
       resizeObserver.observe(container);
       entry.resizeObserver = resizeObserver;
 
+      // Notify caller that this terminal is ready to receive output
+      onTerminalReadyRef.current?.(agentId);
+
     } finally {
       initializingRef.current.delete(agentId);
     }
-  }, [agents, loadModules, fontSize, debouncedFit]);
+  }, [loadModules, fontSize, debouncedFit, theme]);
 
   // Register a container element for an agent's terminal
   const registerContainer = useCallback((agentId: string, container: HTMLDivElement | null) => {
@@ -283,26 +323,49 @@ export function useMultiTerminal({ agents }: UseMultiTerminalOptions) {
     });
   }, []);
 
+  // Sync fontSize state when the persisted initialFontSize prop changes
+  // (e.g. settings loaded async, or changed from Settings page)
+  useEffect(() => {
+    if (initialFontSize !== undefined && initialFontSize !== prevInitialFontSizeRef.current) {
+      prevInitialFontSizeRef.current = initialFontSize;
+      setFontSize(initialFontSize);
+      applyFontSize(initialFontSize);
+    }
+  }, [initialFontSize, applyFontSize]);
+
   const zoomIn = useCallback(() => {
     setFontSize(prev => {
       const next = Math.min(prev + 1, MAX_FONT_SIZE);
       applyFontSize(next);
+      onFontSizeChange?.(next);
       return next;
     });
-  }, [applyFontSize]);
+  }, [applyFontSize, onFontSizeChange]);
 
   const zoomOut = useCallback(() => {
     setFontSize(prev => {
       const next = Math.max(prev - 1, MIN_FONT_SIZE);
       applyFontSize(next);
+      onFontSizeChange?.(next);
       return next;
     });
-  }, [applyFontSize]);
+  }, [applyFontSize, onFontSizeChange]);
 
   const zoomReset = useCallback(() => {
     setFontSize(DEFAULT_FONT_SIZE);
     applyFontSize(DEFAULT_FONT_SIZE);
-  }, [applyFontSize]);
+    onFontSizeChange?.(DEFAULT_FONT_SIZE);
+  }, [applyFontSize, onFontSizeChange]);
+
+  // Update theme on all live terminals when it changes
+  useEffect(() => {
+    const themeObj = getTerminalTheme(theme);
+    terminalsRef.current.forEach((entry) => {
+      if (!entry.disposed) {
+        entry.terminal.options.theme = themeObj;
+      }
+    });
+  }, [theme]);
 
   // Single global onOutput listener that dispatches to correct terminal
   useEffect(() => {

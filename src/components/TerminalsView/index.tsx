@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import { isElectron } from '@/hooks/useElectron';
 import { DndContext } from '@dnd-kit/core';
 import { useElectronAgents, useElectronFS, useElectronSkills } from '@/hooks/useElectron';
 import { useMultiTerminal } from './hooks/useMultiTerminal';
@@ -46,6 +47,25 @@ export default function TerminalsView() {
   const [focusedPanelId, setFocusedPanelId] = useState<string | null>(null);
   const [panelOpen, setPanelOpen] = useState(false);
   const [viewFullscreen, setViewFullscreen] = useState(false);
+  const [terminalFontSize, setTerminalFontSize] = useState(11);
+  const pendingStartRef = useRef<{ agentId: string; prompt: string; options?: { model?: string } } | null>(null);
+  const [terminalTheme, setTerminalTheme] = useState<'dark' | 'light'>('dark');
+  const [terminalSettingsLoaded, setTerminalSettingsLoaded] = useState(!isElectron());
+
+  // Load terminal settings from app settings
+  useEffect(() => {
+    if (!isElectron() || !window.electronAPI?.appSettings) {
+      setTerminalSettingsLoaded(true);
+      return;
+    }
+    window.electronAPI.appSettings.get().then((settings) => {
+      if (settings) {
+        if (settings.terminalFontSize) setTerminalFontSize(settings.terminalFontSize);
+        if (settings.terminalTheme) setTerminalTheme(settings.terminalTheme);
+      }
+      setTerminalSettingsLoaded(true);
+    });
+  }, []);
 
   // Tab manager — core state for two-tier tab system
   const allAgentIds = useMemo(() => agents.map(a => a.id), [agents]);
@@ -90,8 +110,30 @@ export default function TerminalsView() {
   // Agent IDs for grid
   const agentIds = useMemo(() => filteredAgents.map(a => a.id), [filteredAgents]);
 
-  // Core hooks
-  const multiTerminal = useMultiTerminal({ agents: filteredAgents });
+  // Called when a terminal is fully initialized — fire any deferred agent start
+  const handleTerminalReady = useCallback((agentId: string) => {
+    const pending = pendingStartRef.current;
+    if (pending && pending.agentId === agentId) {
+      pendingStartRef.current = null;
+      startAgent(pending.agentId, pending.prompt, pending.options as { model?: string; resume?: boolean }).catch(error => {
+        console.error('Failed to start agent after creation:', error);
+      });
+    }
+  }, [startAgent]);
+
+  // Core hooks — delay terminal init until settings are loaded to avoid wrong font size
+  const multiTerminal = useMultiTerminal({
+    agents: terminalSettingsLoaded ? filteredAgents : [],
+    initialFontSize: terminalFontSize,
+    onFontSizeChange: (size) => {
+      setTerminalFontSize(size);
+      if (isElectron() && window.electronAPI?.appSettings) {
+        window.electronAPI.appSettings.save({ terminalFontSize: size });
+      }
+    },
+    theme: terminalTheme,
+    onTerminalReady: handleTerminalReady,
+  });
   const grid = useTerminalGrid({ agentIds, preset: gridPreset, isEditable, tabId });
   const broadcast = useBroadcast();
   const search = useTerminalSearch(filteredAgents);
@@ -216,11 +258,13 @@ export default function TerminalsView() {
     if (tabManager.isCustomTabActive && tabManager.activeCustomTab) {
       tabManager.addAgentToTab(tabManager.activeCustomTab.id, agent.id);
     }
+    // Defer start until the terminal for this agent is initialized.
+    // The onTerminalReady callback will fire startAgent once xterm is ready.
     if (prompt) {
-      await startAgent(agent.id, prompt, { model } as { model?: string; resume?: boolean });
+      pendingStartRef.current = { agentId: agent.id, prompt, options: { model } };
     }
     setShowNewChatModal(false);
-  }, [createAgent, startAgent, tabManager]);
+  }, [createAgent, tabManager]);
 
   // Auto-start all idle agents when the Terminals view opens
   const autoStartedRef = useRef(false);

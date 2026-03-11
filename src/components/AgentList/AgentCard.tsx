@@ -4,6 +4,11 @@ import { Loader2, AlertTriangle, GitBranch, Pencil, Crown } from 'lucide-react';
 import type { AgentStatus } from '@/types/electron';
 import { STATUS_COLORS, CHARACTER_FACES, getProjectColor, isSuperAgentCheck } from '@/app/agents/constants';
 
+const PROVIDER_ICONS: Record<string, { src: string; alt: string }> = {
+  claude: { src: '/claude-ai-icon.webp', alt: 'Claude' },
+  codex: { src: '/chatgpt-icon.webp', alt: 'ChatGPT' },
+};
+
 interface AgentCardProps {
   agent: AgentStatus;
   isSelected: boolean;
@@ -58,9 +63,22 @@ export function AgentCard({ agent, isSelected, onSelect, onEdit }: AgentCardProp
         </div>
         <div className="flex-1 min-w-0">
           <div className="flex items-center justify-between gap-2">
-            <h4 className={`font-medium text-sm truncate flex items-center gap-1.5 ${isSuper ? 'text-foreground' : ''}`}>
+            <h4 className={`font-medium text-sm truncate flex items-center gap-1.5 font-sans ${isSuper ? 'text-foreground' : ''}`}>
               {isSuper && <Crown className="w-3.5 h-3.5 text-amber-600" />}
               {agent.name || 'Unnamed Agent'}
+              {(() => {
+                const p = agent.provider && agent.provider !== 'local' ? agent.provider : 'claude';
+                const icon = PROVIDER_ICONS[p];
+                if (icon) return <img src={icon.src} alt={icon.alt} title={icon.alt} className="w-4 h-4 object-contain shrink-0" />;
+                if (p === 'gemini') return (
+                  <span title="Gemini" className="shrink-0 inline-flex">
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 text-black" fill="currentColor">
+                      <path d="M12 0C12 6.627 6.627 12 0 12c6.627 0 12 5.373 12 12 0-6.627 5.373-12 12-12-6.627 0-12-5.373-12-12Z" />
+                    </svg>
+                  </span>
+                );
+                return null;
+              })()}
             </h4>
             <div className="flex items-center gap-1.5 shrink-0">
               <button
@@ -100,6 +118,11 @@ export function AgentCard({ agent, isSelected, onSelect, onEdit }: AgentCardProp
             >
               {projectName}
             </span>
+            {agent.provider === 'local' && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded font-medium bg-accent-green/20 text-accent-green">
+                {agent.localModel || 'Local'}
+              </span>
+            )}
             {agent.branchName && (
               <span className="flex items-center gap-1 text-[10px] text-accent-purple">
                 <GitBranch className="w-3 h-3" />

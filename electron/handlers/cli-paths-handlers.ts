@@ -20,9 +20,9 @@ export interface CLIPathsHandlerDependencies {
 /**
  * Detect CLI paths from the system
  */
-async function detectCLIPaths(): Promise<{ claude: string; gh: string; node: string }> {
+async function detectCLIPaths(): Promise<{ claude: string; codex: string; gemini: string; gws: string; gcloud: string; gh: string; node: string }> {
   const homeDir = os.homedir();
-  const paths = { claude: '', gh: '', node: '' };
+  const paths = { claude: '', codex: '', gemini: '', gws: '', gcloud: '', gh: '', node: '' };
 
   // Common locations to check
   const commonPaths = [
@@ -61,6 +61,104 @@ async function detectCLIPaths(): Promise<{ claude: string; gh: string; node: str
       });
       if (stdout.trim()) {
         paths.claude = stdout.trim();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Check for codex
+  for (const dir of commonPaths) {
+    const codexPath = path.join(dir, 'codex');
+    if (fs.existsSync(codexPath)) {
+      paths.codex = codexPath;
+      break;
+    }
+  }
+
+  // Try which command for codex
+  if (!paths.codex) {
+    try {
+      const { stdout } = await execAsync('which codex', {
+        env: { ...process.env, PATH: `${commonPaths.join(':')}:${process.env.PATH}` },
+      });
+      if (stdout.trim()) {
+        paths.codex = stdout.trim();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Check for gemini
+  for (const dir of commonPaths) {
+    const geminiPath = path.join(dir, 'gemini');
+    if (fs.existsSync(geminiPath)) {
+      paths.gemini = geminiPath;
+      break;
+    }
+  }
+
+  // Try which command for gemini
+  if (!paths.gemini) {
+    try {
+      const { stdout } = await execAsync('which gemini', {
+        env: { ...process.env, PATH: `${commonPaths.join(':')}:${process.env.PATH}` },
+      });
+      if (stdout.trim()) {
+        paths.gemini = stdout.trim();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Check for gws
+  for (const dir of commonPaths) {
+    const gwsPath = path.join(dir, 'gws');
+    if (fs.existsSync(gwsPath)) {
+      paths.gws = gwsPath;
+      break;
+    }
+  }
+
+  // Try which command for gws
+  if (!paths.gws) {
+    try {
+      const { stdout } = await execAsync('which gws', {
+        env: { ...process.env, PATH: `${commonPaths.join(':')}:${process.env.PATH}` },
+      });
+      if (stdout.trim()) {
+        paths.gws = stdout.trim();
+      }
+    } catch {
+      // Ignore
+    }
+  }
+
+  // Check for gcloud (also check gcloud-specific install locations)
+  const gcloudPaths = [
+    ...commonPaths,
+    '/opt/homebrew/share/google-cloud-sdk/bin',
+    '/usr/local/Caskroom/google-cloud-sdk/latest/google-cloud-sdk/bin',
+    path.join(homeDir, 'google-cloud-sdk/bin'),
+  ];
+  for (const dir of gcloudPaths) {
+    const gcloudPath = path.join(dir, 'gcloud');
+    if (fs.existsSync(gcloudPath)) {
+      paths.gcloud = gcloudPath;
+      break;
+    }
+  }
+
+  // Try which command for gcloud
+  if (!paths.gcloud) {
+    try {
+      const { stdout } = await execAsync('which gcloud', {
+        env: { ...process.env, PATH: `${gcloudPaths.join(':')}:${process.env.PATH}` },
+      });
+      if (stdout.trim()) {
+        paths.gcloud = stdout.trim();
       }
     } catch {
       // Ignore
@@ -191,7 +289,7 @@ export function registerCLIPathsHandlers(deps: CLIPathsHandlerDependencies): voi
   // Get CLI paths from app settings
   ipcMain.handle('cliPaths:get', async () => {
     const settings = getAppSettings();
-    return settings.cliPaths || { claude: '', gh: '', node: '', additionalPaths: [] };
+    return settings.cliPaths || { claude: '', codex: '', gemini: '', gws: '', gcloud: '', gh: '', node: '', additionalPaths: [] };
   });
 
   // Save CLI paths
@@ -244,6 +342,10 @@ export function getCLIPathsConfig(): CLIPaths & { fullPath: string } {
 
   return {
     claude: '',
+    codex: '',
+    gemini: '',
+    gws: '',
+    gcloud: '',
     gh: '',
     node: '',
     additionalPaths: [],

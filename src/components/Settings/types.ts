@@ -26,6 +26,10 @@ export interface Skill {
 
 export interface CLIPaths {
   claude: string;
+  codex: string;
+  gemini: string;
+  gws: string;
+  gcloud: string;
   gh: string;
   node: string;
   additionalPaths: string[];
@@ -53,9 +57,22 @@ export interface AppSettings {
   jiraApiToken: string;
   socialDataEnabled: boolean;
   socialDataApiKey: string;
+  xPostingEnabled: boolean;
+  xApiKey: string;
+  xApiSecret: string;
+  xAccessToken: string;
+  xAccessTokenSecret: string;
+  tasmaniaEnabled: boolean;
+  tasmaniaServerPath: string;
+  gwsEnabled: boolean;
+  gwsSkillsInstalled: boolean;
   verboseModeEnabled: boolean;
   autoCheckUpdates: boolean;
   cliPaths: CLIPaths;
+  defaultProvider?: string;
+  obsidianVaultPaths?: string[];
+  terminalFontSize?: number;
+  terminalTheme?: 'dark' | 'light';
 }
 
-export type SettingsSection = 'general' | 'memory' | 'git' | 'notifications' | 'telegram' | 'slack' | 'jira' | 'socialdata' | 'permissions' | 'skills' | 'cli' | 'system';
+export type SettingsSection = 'general' | 'terminal' | 'git' | 'notifications' | 'telegram' | 'slack' | 'jira' | 'socialdata' | 'tasmania' | 'google-workspace' | 'obsidian' | 'permissions' | 'skills' | 'cli' | 'system';

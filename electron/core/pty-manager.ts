@@ -37,6 +37,18 @@ export function killAllPty(): void {
   console.log(`Killed ${killed} PTY process(es) on shutdown`);
 }
 
+/**
+ * Write a command to a PTY and submit it.
+ * Sends plain text + carriage return. The receiving shell (bash/zsh) parses it
+ * as a normal command line.
+ *
+ * DO NOT use this for raw keystroke passthrough from xterm.js UI terminals.
+ */
+export function writeProgrammaticInput(ptyProcess: pty.IPty, data: string): void {
+  ptyProcess.write(data);
+  ptyProcess.write('\r');
+}
+
 export function writeToPty(ptyId: string, data: string, isQuick = false): boolean {
   const processes = isQuick ? quickPtyProcesses : ptyProcesses;
   const ptyProcess = processes.get(ptyId);
