@@ -2,7 +2,7 @@
 
 import { Loader2, AlertTriangle, GitBranch, Pencil, Crown } from 'lucide-react';
 import type { AgentStatus } from '@/types/electron';
-import { STATUS_COLORS, CHARACTER_FACES, getProjectColor, isSuperAgentCheck } from '@/app/agents/constants';
+import { STATUS_COLORS, STATUS_LABELS, CHARACTER_FACES, getProjectColor, isSuperAgentCheck } from '@/app/agents/constants';
 
 const PROVIDER_ICONS: Record<string, { src: string; alt: string }> = {
   claude: { src: '/claude-ai-icon.webp', alt: 'Claude' },
@@ -70,6 +70,9 @@ export function AgentCard({ agent, isSelected, onSelect, onEdit }: AgentCardProp
                 const p = agent.provider && agent.provider !== 'local' ? agent.provider : 'claude';
                 const icon = PROVIDER_ICONS[p];
                 if (icon) return <img src={icon.src} alt={icon.alt} title={icon.alt} className="w-4 h-4 object-contain shrink-0" />;
+                if (p === 'opencode') return (
+                  <span title="OpenCode" className="shrink-0 inline-flex text-cyan-500 text-[10px] font-bold">OC</span>
+                );
                 if (p === 'gemini') return (
                   <span title="Gemini" className="shrink-0 inline-flex">
                     <svg viewBox="0 0 24 24" className="w-4 h-4 text-black" fill="currentColor">
@@ -96,7 +99,7 @@ export function AgentCard({ agent, isSelected, onSelect, onEdit }: AgentCardProp
                   ? 'bg-amber-500/20 text-amber-400'
                   : `${statusConfig.bg} ${statusConfig.text}`
               }`}>
-                {agent.status}
+                {STATUS_LABELS[agent.status]}
               </span>
             </div>
           </div>
@@ -107,7 +110,7 @@ export function AgentCard({ agent, isSelected, onSelect, onEdit }: AgentCardProp
                 Path not found
               </span>
             ) : (
-              agent.currentTask || 'Waiting for task...'
+              agent.currentTask || 'Ready to work'
             )}
           </p>
           {/* Project badge and branch */}

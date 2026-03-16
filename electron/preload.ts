@@ -50,7 +50,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name?: string;
       secondaryProjectPath?: string;
       skipPermissions?: boolean;
-      provider?: 'claude' | 'local';
+      provider?: string;
       localModel?: string;
       obsidianVaultPaths?: string[];
     }) => ipcRenderer.invoke('agent:create', config),
@@ -62,7 +62,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
       name?: string;
       character?: string;
     }) => ipcRenderer.invoke('agent:update', params),
-    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean; provider?: 'claude' | 'local'; localModel?: string } }) =>
+    start: (params: { id: string; prompt: string; options?: { model?: string; resume?: boolean; provider?: string; localModel?: string } }) =>
       ipcRenderer.invoke('agent:start', params),
     get: (id: string) =>
       ipcRenderer.invoke('agent:get', id),
@@ -104,6 +104,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
       const listener = (_: unknown, event: { type: string; agentId: string; status: string; timestamp: string }) => callback(event);
       ipcRenderer.on('agent:status', listener);
       return () => ipcRenderer.removeListener('agent:status', listener);
+    },
+    onTick: (callback: (agents: Array<{
+      id: string; name: string; character: string;
+      status: string; displayStatus: string; statusLine: string;
+      currentTask: string; projectName: string; lastActivity: string; provider: string;
+    }>) => void) => {
+      const listener = (_: unknown, data: unknown) => callback(data as Parameters<typeof callback>[0]);
+      ipcRenderer.on('agents:tick', listener);
+      return () => ipcRenderer.removeListener('agents:tick', listener);
     },
   },
 
@@ -198,22 +207,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   appSettings: {
     get: () =>
       ipcRenderer.invoke('app:getSettings'),
-    save: (settings: {
-      notificationsEnabled?: boolean;
-      notifyOnWaiting?: boolean;
-      notifyOnComplete?: boolean;
-      notifyOnError?: boolean;
-      telegramEnabled?: boolean;
-      telegramBotToken?: string;
-      telegramChatId?: string;
-      slackEnabled?: boolean;
-      slackBotToken?: string;
-      slackAppToken?: string;
-      slackSigningSecret?: string;
-      slackChannelId?: string;
-      socialDataEnabled?: boolean;
-      socialDataApiKey?: string;
-    }) =>
+    save: (settings: Record<string, unknown>) =>
       ipcRenderer.invoke('app:saveSettings', settings),
     onUpdated: (callback: (settings: unknown) => void) => {
       const listener = (_: unknown, settings: unknown) => callback(settings);
@@ -304,6 +298,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.invoke('dialog:open-folder'),
     openFiles: () =>
       ipcRenderer.invoke('dialog:open-files') as Promise<string[]>,
+    openAudio: () =>
+      ipcRenderer.invoke('dialog:open-audio') as Promise<string | null>,
   },
 
   // Shell operations
@@ -556,6 +552,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
     },
   },
 
+  // Custom MCP server config
+  mcp: {
+    list: (params: { provider: string }) =>
+      ipcRenderer.invoke('mcp:list', params),
+    update: (params: { provider: string; name: string; command: string; args: string[]; env: Record<string, string> }) =>
+      ipcRenderer.invoke('mcp:update', params),
+    delete: (params: { provider: string; name: string }) =>
+      ipcRenderer.invoke('mcp:delete', params),
+  },
+
   // CLI Paths management
   cliPaths: {
     detect: () =>
@@ -627,6 +633,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // API
   api: {
     getToken: () => ipcRenderer.invoke('api:getToken') as Promise<string>,
+  },
+
+  // Tray menu events
+  tray: {
+    onFocusAgent: (callback: (agentId: string) => void) => {
+      const listener = (_: unknown, agentId: string) => callback(agentId);
+      ipcRenderer.on('tray:focus-agent', listener);
+      return () => ipcRenderer.removeListener('tray:focus-agent', listener);
+    },
+    showMainWindow: () => ipcRenderer.invoke('tray:showMainWindow'),
+    quit: () => ipcRenderer.invoke('tray:quit'),
   },
 
   // Platform info

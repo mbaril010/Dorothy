@@ -5,7 +5,7 @@ export interface WorktreeConfig {
 
 export type AgentCharacter = 'robot' | 'ninja' | 'wizard' | 'astronaut' | 'knight' | 'pirate' | 'alien' | 'viking';
 
-export type AgentProvider = 'claude' | 'codex' | 'gemini' | 'local';
+export type AgentProvider = 'claude' | 'codex' | 'gemini' | 'opencode' | 'local';
 
 export interface AgentStatus {
   id: string;
@@ -26,6 +26,7 @@ export interface AgentStatus {
   skipPermissions?: boolean;
   currentSessionId?: string;
   kanbanTaskId?: string;  // For kanban task completion tracking
+  statusLine?: string;       // ANSI-stripped last meaningful output line
   lastCleanOutput?: string;  // Clean text output captured from transcript by hooks
   provider?: AgentProvider;   // 'claude' (default) or 'local' (Tasmania)
   localModel?: string;        // Tasmania model name when provider is 'local'
@@ -36,6 +37,7 @@ export interface CLIPaths {
   claude: string;
   codex: string;
   gemini: string;
+  opencode: string;
   gws: string;
   gcloud: string;
   gh: string;
@@ -47,6 +49,7 @@ export interface AppSettings {
   notificationsEnabled: boolean;
   notifyOnWaiting: boolean;
   notifyOnComplete: boolean;
+  notifyOnStop: boolean;
   notifyOnError: boolean;
   telegramEnabled: boolean;
   telegramBotToken: string;
@@ -77,8 +80,20 @@ export interface AppSettings {
   verboseModeEnabled: boolean;
   autoCheckUpdates: boolean;
   cliPaths: CLIPaths;
+  opencodeEnabled: boolean;
+  opencodeDefaultModel: string;
   defaultProvider?: AgentProvider;
   obsidianVaultPaths?: string[];
+  notificationSounds?: {
+    waiting?: string;
+    complete?: string;
+    stop?: string;
+    error?: string;
+  };
   terminalFontSize?: number;
   terminalTheme?: 'dark' | 'light';
+  statusLineEnabled?: boolean;
+  favoriteProjects?: string[];
+  hiddenProjects?: string[];
+  defaultProjectPath?: string;
 }
